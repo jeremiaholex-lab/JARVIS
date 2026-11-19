@@ -77,6 +77,7 @@ SAMPLE_RATE = 16000
 # Sentence-shaping lives in jarvis.speech so the morning briefing (which has no
 # web server in front of it) speaks with the same rules the orb does.
 from jarvis.speech import split_sentences as _split_sentences, speech_text as _speech_text
+from jarvis.security.file_edit import CONFIRM_PHRASE
 OWW_FRAME = 1280          # 80 ms
 MAX_UTTERANCE_S = 30
 TAIL_S = 1.2              # silence needed to close a VAD segment (relaxed from 0.6 for accented and deliberate speech)
@@ -86,6 +87,10 @@ WAKE_MODEL = "hey jarvis"
 # Typed confirmation for a destructive file edit, sent from the chat box:
 # "yes, do it fe_ab12". Parsed offline so a phrase never reaches the model —
 # the model must not be able to answer its own confirmation prompt.
+# "yes fe_ab12" cannot apply a destructive edit; answer it here rather than
+# handing it to the model, which would confidently say it applied a file it
+# never touched. Mirrors the Telegram host.
+_EDIT_BARE_YES_RE = re.compile(r"^yes\s+(fe_\w+)$", re.IGNORECASE)
 _EDIT_CONFIRM_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
 _EDIT_CANCEL_RE = re.compile(r"^(no|cancel)\s+(fe_\w+)$", re.IGNORECASE)
 
@@ -1251,6 +1256,18 @@ def build_app():
                 # answer its own confirmation prompt.
                 edit_confirm = _EDIT_CONFIRM_RE.match(text)
                 edit_cancel = _EDIT_CANCEL_RE.match(text)
+                bare_yes = _EDIT_BARE_YES_RE.match(text)
+                if bare_yes:
+                    # Do not run a turn: a bare yes applies nothing, and the
+                    # model would claim otherwise.
+                    note = (f"{bare_yes.group(1)} is a destructive file edit, so "
+                            f"'yes' alone will not apply it. Type "
+                            f"'{CONFIRM_PHRASE} {bare_yes.group(1)}' to confirm "
+                            f"it, or 'no {bare_yes.group(1)}' to cancel.")
+                    c.remember("user", text)
+                    c.remember("assistant", note, "edits")
+                    c.emit(q, "chat", role="system", text=note, engine="edits")
+                    continue
                 if edit_confirm or edit_cancel:
                     confirmed = bool(edit_confirm)
                     phrase = edit_confirm.group(1) if confirmed else ""
@@ -1266,6 +1283,9 @@ def build_app():
                         note = (f"Edited {oc.get('path', 'the file')} "
                                 f"(+{oc.get('added', 0)} -{oc.get('removed', 0)}).")
                     c.remember("user", text)
+                    # Pair it with the reply, or the history keeps a user turn
+                    # with nothing after it and reads as if JARVIS ignored them.
+                    c.remember("assistant", note, "edits")
                     c.emit(q, "edit_resolved", token=token, approved=confirmed,
                            outcome=result)
                     c.emit(q, "chat", role="system", text=note, engine="edits")

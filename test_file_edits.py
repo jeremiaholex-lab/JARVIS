@@ -240,6 +240,28 @@ def test_chat_box_cancel_regex():
     assert not pattern.match("no")
 
 
+def test_chat_box_bare_yes_is_intercepted_not_sent_to_the_model():
+    """'yes fe_x' must not reach the model: it cannot apply anything, but it
+    would say it did. It is answered with the phrase hint instead, matching the
+    Telegram host, and must never match the confirm pattern."""
+    import re
+
+    from jarvis.security.file_edit import CONFIRM_PHRASE
+
+    bare = re.compile(r"^yes\s+(fe_\w+)$", re.IGNORECASE)
+    confirm = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
+    token = "fe_abc123"
+
+    m = bare.match(f"yes {token}")
+    assert m and m.group(1) == token
+    assert not confirm.match(f"yes {token}"), "a bare yes must never confirm"
+    # The hint it is answered with names the real phrase.
+    hint = (f"{m.group(1)} is a destructive file edit, so 'yes' alone will not "
+            f"apply it. Type '{CONFIRM_PHRASE} {m.group(1)}' to confirm it, "
+            f"or 'no {m.group(1)}' to cancel.")
+    assert CONFIRM_PHRASE in hint and token in hint
+
+
 def test_wrong_phrase_from_chat_box_leaves_the_token_settleable(editor, target):
     """Mirrors the orb: a mismatched phrase is refused but the user can retry."""
     r = editor.propose({"action": "replace", "path": str(target),

@@ -9,6 +9,8 @@ The invariants pinned here:
   * credential-shaped paths, VCS dirs, binaries and multi-match replaces are refused.
 """
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -230,6 +232,28 @@ def test_shouted_confirmation_can_be_undone(editor, target):
     editor.resolve(r["token"], True, CONFIRM_PHRASE)
     assert editor.undo(r["token"].upper())["undone"] is True
     assert target.read_text() == original
+
+
+def test_minted_tokens_are_always_lowercase():
+    """The orb's card-button path (confirm_edit) forwards the token verbatim,
+    so it settles only because ``propose()`` mints lowercase. That safety is
+    incidental, not asserted anywhere else — pin it, so a future change to the
+    id format cannot silently break the button while the typed-phrase path
+    (which now lowercases) keeps passing.
+    """
+    import re
+
+    from jarvis.security.file_edit import SecuredFileEdits
+    from jarvis.security.auditor import Auditor
+
+    editor = SecuredFileEdits(Auditor(use_llm=False))
+    with tempfile.TemporaryDirectory() as d:
+        note = Path(d) / "note.txt"
+        note.write_text("a\nb\n", encoding="utf-8")
+        for _ in range(50):
+            token = editor.propose({"action": "replace", "path": str(note),
+                                    "old_string": "b", "new_string": "c"})["token"]
+            assert re.fullmatch(r"fe_[0-9a-f]{16}", token), token
 
 
 def test_shouted_edit_token_never_reaches_the_write_resolver():

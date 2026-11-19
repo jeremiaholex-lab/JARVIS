@@ -25,8 +25,9 @@ _logger = logging.getLogger(__name__)
 
 TOOL_GUIDANCE = (
     "For explicitly requested background work, you may queue a task with jarvis_task_enqueue "
-    "and check progress with jarvis_task_status. Background tasks use read-only tools; do not "
-    "promise unattended writes or external actions. "
+    "and check progress with jarvis_task_status. "
+    "For multi-step goals, use jarvis_plan_and_enqueue to decompose into dependent sub-tasks. "
+    "Background tasks use read-only tools; do not promise unattended writes or external actions. "
     "You have read-only tools for the user's own data: their projects and "
     "deadlines, their indexed documents, read-only Google mail/calendar/task data, "
     "their Notion notes, a read-only web search, and read-only access to files on "

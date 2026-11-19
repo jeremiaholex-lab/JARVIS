@@ -270,6 +270,65 @@ def _task_status(task_id: str = "", limit: int = 10) -> str:
                                   for t in store.list(limit=limit, include_terminal=False)]}, ensure_ascii=False)
 
 
+def _plan_and_enqueue(goal: str, max_subtasks: int = 5, idempotency_key: str = "") -> str:
+    """Decompose a goal into a plan of sub-tasks and enqueue them atomically."""
+    from jarvis.agent.task_runner import configured_task_store
+    from jarvis.agent.planner import decompose_goal
+
+    store = configured_task_store()
+    if store is None:
+        return json.dumps({"error": "durable task worker is not available in this host"})
+
+    try:
+        plan = decompose_goal(goal, max_subtasks=max_subtasks, call_engine=_planner_engine)
+    except ValueError as exc:
+        return json.dumps({"error": f"plan validation failed: {exc}"})
+
+    root, subtasks = store.create_plan(plan)
+    return json.dumps({
+        "plan_id": root.id,
+        "root_goal": root.goal,
+        "subtasks": [
+            {"id": t.id, "index": t.step_index, "goal": t.goal, "depends_on": t.depends_on}
+            for t in subtasks
+        ],
+        "note": f"Plan enqueued with {len(subtasks)} sub-tasks. Root task coordinates completion.",
+    }, ensure_ascii=False)
+
+
+def _planner_engine(engine: str, msgs: list, tools: list | None) -> dict:
+    """Engine callable for the planner to use the local model."""
+    from jarvis.agent.tools import _VISION_PROVIDER
+
+    # Use the same engine resolution as the agent turn
+    if _VISION_PROVIDER is not None:
+        local_engine, cloud_factory, settings = _VISION_PROVIDER()
+        if local_engine is not None:
+            from openjarvis.core.types import Message, Role
+            role_map = {r.value: r for r in Role}
+            converted = []
+            for m in msgs:
+                calls = [
+                    {"id": c.get("id", ""), "name": c.get("name", ""), "arguments": c.get("arguments", "{}")}
+                    for c in (m.get("tool_calls") or [])
+                ]
+                converted.append(Message(
+                    role=role_map.get(m.get("role", "user"), Role.USER),
+                    content=m.get("content") or "",
+                    tool_calls=calls or None,
+                    tool_call_id=m.get("tool_call_id"),
+                ))
+            return local_engine.generate(
+                converted,
+                model=settings["local_model"],
+                num_ctx=4096,
+                temperature=0.3,
+                max_tokens=800,
+            )
+    # Fallback if provider not wired
+    return {"content": json.dumps({"steps": [{"index": 0, "goal": msgs[0]["content"][:200], "depends_on": []}]})}
+
+
 def _current_time() -> str:
     now = datetime.now().astimezone()
     return json.dumps({"iso": now.isoformat(timespec="seconds"), "weekday": now.strftime("%A")})
@@ -474,6 +533,19 @@ def build_tools() -> List[AgentTool]:
             "limit": {"type": "integer", "description": "1-20, default 10"},
         }},
     )
+    plan_and_enqueue = _check_tier(
+        "jarvis_plan_and_enqueue",
+        _plan_and_enqueue,
+        "Decompose a goal into a plan of dependent sub-tasks and enqueue them atomically. "
+        "Use when the user wants multi-step background work (research, summarization, analysis). "
+        "The planner returns a DAG of sub-tasks with dependencies; the root task coordinates completion. "
+        "Sub-tasks run with read-only tools and cannot perform writes.",
+        {"type": "object", "properties": {
+            "goal": {"type": "string", "description": "The user's high-level goal"},
+            "max_subtasks": {"type": "integer", "description": "Maximum sub-tasks (1-10, default 5)"},
+            "idempotency_key": {"type": "string", "description": "Optional request id to prevent duplicate queueing"},
+        }, "required": ["goal"]},
+    )
     clock = _check_tier(
         "get_current_time",
         _current_time,
@@ -491,7 +563,7 @@ def build_tools() -> List[AgentTool]:
         {"type": "object", "properties": {"question": {"type": "string"}}},
     )
     tools.extend([t for t in (projects, rag, google, web, files_read, files_list,
-                               files_search, notion, task_enqueue, task_status, clock, screen) if t is not None])
+                               files_search, notion, task_enqueue, task_status, plan_and_enqueue, clock, screen) if t is not None])
 
     # Stage 2: one WRITE-tier tool. It is advertised (so the model knows it can
     # act), but its fn is a side-effect-free proposer — running it only queues

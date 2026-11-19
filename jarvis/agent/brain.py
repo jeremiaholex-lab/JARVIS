@@ -121,7 +121,10 @@ class Brain:
         self.schemas = tool_schemas(self.tools)
         # No screen on a chat host: wire a vision context that reports absent,
         # so look_at_screen degrades to a clean error instead of a crash.
-        configure_vision(lambda: (None, None, self.settings))
+        # But provide the local engine for planner use.
+        def _vision_context():
+            return self._local, None, self.settings
+        configure_vision(_vision_context)
 
         self._local = None
         self._cloud = None

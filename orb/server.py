@@ -395,7 +395,10 @@ class AgentContext:
         from jarvis.agent.tools import configure_vision, configure_writes
         from jarvis.agent.tools import configure_file_edits
 
-        configure_vision(self._vision_context)
+        # Provide local engine for planner use; vision is handled separately
+        def _vision_context():
+            return self.local, self.cloud_engine, SETTINGS
+        configure_vision(_vision_context)
         self.writes = self._build_writes()
         configure_writes(self.writes)
         self.file_edits = self._build_file_edits()

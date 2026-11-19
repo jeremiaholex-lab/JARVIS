@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -43,6 +43,10 @@ class AgentTask:
     result: str = ""
     error: str = ""
     idempotency_key: str = ""
+    plan_id: str = ""
+    step_index: int = -1
+    depends_on: list[str] = field(default_factory=list)
+    is_plan_root: bool = False
 
 
 @dataclass(slots=True)
@@ -88,12 +92,18 @@ class TaskStore:
                     checkpoint_json TEXT,
                     result TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '',
-                    idempotency_key TEXT NOT NULL DEFAULT ''
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    plan_id TEXT NOT NULL DEFAULT '',
+                    step_index INTEGER NOT NULL DEFAULT -1,
+                    depends_on TEXT NOT NULL DEFAULT '[]',
+                    is_plan_root INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS agent_tasks_idempotency
                     ON agent_tasks(idempotency_key) WHERE idempotency_key <> '';
                 CREATE INDEX IF NOT EXISTS agent_tasks_queue
                     ON agent_tasks(status, created_at);
+                CREATE INDEX IF NOT EXISTS agent_tasks_plan
+                    ON agent_tasks(plan_id, step_index);
                 CREATE TABLE IF NOT EXISTS agent_task_events (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL,
@@ -102,6 +112,24 @@ class TaskStore:
                     detail_json TEXT NOT NULL DEFAULT '{}'
                 );
             """)
+            # Migration for existing databases: add columns if they don't exist
+            self._migrate_schema(db)
+
+    def _migrate_schema(self, db) -> None:
+        """Add plan columns to existing databases."""
+        cols = {r[1] for r in db.execute("PRAGMA table_info(agent_tasks)").fetchall()}
+        if "plan_id" not in cols:
+            db.execute("ALTER TABLE agent_tasks ADD COLUMN plan_id TEXT DEFAULT ''")
+        if "step_index" not in cols:
+            db.execute("ALTER TABLE agent_tasks ADD COLUMN step_index INTEGER DEFAULT -1")
+        if "depends_on" not in cols:
+            db.execute("ALTER TABLE agent_tasks ADD COLUMN depends_on TEXT DEFAULT '[]'")
+        if "is_plan_root" not in cols:
+            db.execute("ALTER TABLE agent_tasks ADD COLUMN is_plan_root INTEGER DEFAULT 0")
+        # Index may not exist in old schemas
+        idxs = {r[1] for r in db.execute("PRAGMA index_list(agent_tasks)").fetchall()}
+        if "agent_tasks_plan" not in idxs:
+            db.execute("CREATE INDEX agent_tasks_plan ON agent_tasks(plan_id, step_index)")
 
     @contextmanager
     def _connection(self):
@@ -122,11 +150,14 @@ class TaskStore:
         if row is None:
             return None
         checkpoint = json.loads(row["checkpoint_json"]) if row["checkpoint_json"] else None
+        depends_on = json.loads(row["depends_on"]) if row["depends_on"] else []
         return AgentTask(
             id=row["id"], goal=row["goal"], status=row["status"],
             created_at=row["created_at"], updated_at=row["updated_at"],
             attempts=row["attempts"], steps=row["steps"], checkpoint=checkpoint,
             result=row["result"], error=row["error"], idempotency_key=row["idempotency_key"],
+            plan_id=row["plan_id"], step_index=row["step_index"],
+            depends_on=depends_on, is_plan_root=bool(row["is_plan_root"]),
         )
 
     def _event(self, db, task_id: str, event: str, detail: dict | None = None) -> None:

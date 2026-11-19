@@ -1,6 +1,20 @@
 from jarvis.agent.task_runner import DurableTaskRunner, StepResult, TaskStore
 
 
+def test_task_store_has_plan_columns(tmp_path):
+    from jarvis.agent.task_runner import TaskStore
+    store = TaskStore(tmp_path / "tasks.db")
+    import sqlite3
+    with sqlite3.connect(str(tmp_path / "tasks.db")) as db:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(agent_tasks)").fetchall()}
+        assert "plan_id" in cols
+        assert "step_index" in cols
+        assert "depends_on" in cols
+        assert "is_plan_root" in cols
+        idxs = {r[1] for r in db.execute("PRAGMA index_list(agent_tasks)").fetchall()}
+        assert "agent_tasks_plan" in idxs
+
+
 def test_timeout_does_not_start_a_duplicate_retry(tmp_path):
     import time
 

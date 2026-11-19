@@ -4,9 +4,15 @@ from jarvis.agent import tools as agent_tools
 from jarvis.security.tiers import Tier
 
 
-def test_every_exposed_tool_is_read_tier():
+def test_every_exposed_tool_is_read_or_a_proposer():
+    # Stage 2: the only non-READ tool offered is the safe side-effect-free
+    # proposer. Anything else in the tool list must still be read-tier.
+    from jarvis.agent.tools import _PROPOSE_ONLY_TOOLS
     for tool in agent_tools.build_tools():
-        assert tool.tier is Tier.READ, tool.name
+        if tool.tier is Tier.READ:
+            continue
+        assert tool.name in _PROPOSE_ONLY_TOOLS, tool.name
+        assert tool.tier is Tier.WRITE, tool.name
 
 
 def test_schemas_are_openai_function_shaped():

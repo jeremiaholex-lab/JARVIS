@@ -32,7 +32,11 @@ TOOL_GUIDANCE = (
     "whenever the answer depends on that data instead of guessing. Never "
     "invent a fact about the user's projects, files, or schedule. When you "
     "need data, call the tool now — do not say you will search, and do not "
-    "claim you cannot find something without having called a tool."
+    "claim you cannot find something without having called a tool. "
+    "You may also propose one write to the user's project/deadline store with "
+    "jarvis_projects_write, but it only QUEUES the change — it returns a "
+    "confirmation token and nothing is saved until the user confirms it in the "
+    "UI. Never claim a write happened; say it is waiting for their confirmation."
 )
 
 

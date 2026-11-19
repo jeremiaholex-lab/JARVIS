@@ -44,6 +44,16 @@ def _bootstrap_paths() -> None:
     os.environ.setdefault("OPENJARVIS_HOME", str(JARVIS / ".openjarvis"))
 
 
+def _openjarvis_audit_logger():
+    """The same hash-chained AuditLogger the console ConfirmGate writes, so the
+    orb's write decisions and the console's are one trail. Returns None (and
+    SecuredWrites skips logging) when the runtime is unavailable."""
+    from openjarvis.security.audit import AuditLogger
+
+    home = Path(os.environ.get("OPENJARVIS_HOME", str(JARVIS / ".openjarvis")))
+    return AuditLogger(db_path=home / "audit.db")
+
+
 # --- Settings: the same shape the orb uses, so the brain routes identically ---
 
 def default_settings() -> dict:
@@ -103,7 +113,7 @@ class Brain:
         self._env = self._read_env()
         self._cloud_key = self._env.get("AGNES_API_KEY", "")
 
-        from jarvis.agent.tools import build_tools, tool_schemas, configure_vision
+        from jarvis.agent.tools import build_tools, tool_schemas, configure_vision, configure_writes
 
         self.tools = build_tools()
         self.schemas = tool_schemas(self.tools)
@@ -115,6 +125,32 @@ class Brain:
         self._cloud = None
         self._gen_lock = threading.Lock()
         self._init_local_engine()
+
+        self.writes = self._build_writes()
+        configure_writes(self.writes)
+
+    def _build_writes(self):
+        """A deterministic-only secured write executor over the local project
+        store. The load-bearing guards (secret-path HOLD, tier check) are all
+        deterministic, so no extra LLM critic call is spent per write."""
+        from jarvis.agent.tools import _project_store
+        from jarvis.security.auditor import Auditor
+        from jarvis.security.confirm import SecuredWrites
+
+        auditor = Auditor(use_llm=False)
+        try:
+            audit = _openjarvis_audit_logger()
+        except Exception:
+            audit = None
+        return SecuredWrites(_project_store(), auditor, audit_logger=audit)
+
+    def pending_writes(self):
+        """UI-safe view of the writes awaiting confirmation on this host."""
+        return self.writes.pending()
+
+    def resolve_write(self, token: str, approved: bool):
+        """Confirm or reject a queued write. The only mutation in the path."""
+        return self.writes.resolve(token, approved)
 
     @staticmethod
     def _read_env() -> dict:

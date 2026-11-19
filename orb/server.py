@@ -371,9 +371,11 @@ class AgentContext:
 
         self.tools = build_tools()
         self.schemas = tool_schemas(self.tools)
-        from jarvis.agent.tools import configure_vision
+        from jarvis.agent.tools import configure_vision, configure_writes
 
         configure_vision(self._vision_context)
+        self.writes = self._build_writes()
+        configure_writes(self.writes)
         db = governance_home() / "memory.db"
         self.memory = Memory(db)
         self.user_model = UserModel(db)
@@ -400,6 +402,29 @@ class AgentContext:
     def _vision_context(self):
         """What the look_at_screen tool needs: engines plus current settings."""
         return self.local, self.cloud_engine, SETTINGS
+
+    def _build_writes(self):
+        """Deterministic-only secured write executor over the local project
+        store, sharing the console's audit DB so both hosts write one trail."""
+        from jarvis.agent.tools import _project_store
+        from jarvis.security.auditor import Auditor
+        from jarvis.security.confirm import SecuredWrites
+
+        auditor = Auditor(use_llm=False)
+        try:
+            from openjarvis.security.audit import AuditLogger
+            audit = AuditLogger(db_path=audit_db())
+        except Exception:
+            audit = None
+        return SecuredWrites(_project_store(), auditor, audit_logger=audit)
+
+    def pending_writes(self):
+        """UI-safe view of the writes awaiting confirmation in this host."""
+        return self.writes.pending()
+
+    def resolve_write(self, token: str, approved: bool):
+        """Confirm or reject a queued write — the only mutation in the path."""
+        return self.writes.resolve(token, approved)
 
     @staticmethod
     def _measured_speed() -> float | None:
@@ -878,6 +903,11 @@ def build_app():
                route=result.route_reason)
         if fact:
             c.emit(q, "chat", role="assistant", text=f"Noted: {fact}", engine="memory")
+        # A turn may have queued a write (jarvis_projects_write). Hand the UI
+        # the pending confirmation so the user can approve it — the write does
+        # not run until they resolve this token.
+        for pw in ctx.pending_writes():
+            c.emit(q, "write_confirm", **pw)
         # Deriving durable facts costs a model call; do it after the reply has
         # been spoken, never in front of it.
         asyncio.create_task(_learn_about_user(ctx, text))
@@ -1190,6 +1220,24 @@ def build_app():
                 if c.watchdog:
                     c.watchdog.cancel()
                 c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
+            elif op == "confirm_write":
+                # Resolve a queued write (from a jarvis_projects_write this
+                # host proposed). This is the only mutation path; it lands in
+                # the audit chain and tells the UI the result.
+                token = msg.get("token", "")
+                result = await asyncio.to_thread(
+                    agent_context().resolve_write, token, bool(msg.get("approved")))
+                c.emit(q, "write_resolved", token=token, approved=bool(msg.get("approved")),
+                       outcome=result)
+                # Reflect it in chat so the confirmation is visible next to the
+                # "this is waiting on you" line the assistant already spoke.
+                if result.get("error"):
+                    note = f"Write not done: {result['error']}"
+                elif not msg.get("approved"):
+                    note = "Write cancelled."
+                else:
+                    note = "Write saved to your projects."
+                c.emit(q, "chat", role="system", text=note, engine="writes")
             elif op == "playback_done":
                 if c.watchdog:
                     c.watchdog.cancel()

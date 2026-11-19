@@ -114,6 +114,18 @@ section h2 .mini { font: 400 11px var(--mono); letter-spacing: .04em; color: var
 .msg.user .who { color: var(--ink-dim); }
 .msg.assistant .body { color: var(--ink); }
 .msg.error .body { color: var(--bad); }
+.msg.write-confirm .body { color: var(--ink); }
+.msg.write-confirm .wc-line { font-size: 11px; color: var(--ink-dim); margin-bottom: 2px; }
+.msg.write-confirm .wc-what { font: 500 13px var(--mono); color: var(--brass); }
+.msg.write-confirm .wc-actions { display: flex; gap: 6px; margin-top: 7px; }
+.msg.write-confirm .wc-actions button {
+  font: 500 11px var(--mono); letter-spacing: .05em; padding: 3px 12px; cursor: pointer;
+  color: var(--ink); background: transparent; border: 1px solid var(--edge); border-radius: 4px;
+}
+.msg.write-confirm .wc-actions button[data-act="yes"] { border-color: var(--brass-deep); color: var(--brass); }
+.msg.write-confirm .wc-done { font: 500 11px var(--mono); letter-spacing: .05em; color: var(--ink-dim); align-self: center; }
+.msg.write-confirm.failed .wc-done { color: var(--bad); }
+.msg.write-confirm.done .wc-done { color: var(--brass); }
 #chatrow { display: flex; gap: 8px; margin-top: 10px; }
 #chatrow input {
   flex: 1; background: var(--inset); border: 1px solid var(--edge); color: var(--ink);
@@ -888,8 +900,8 @@ function handleOp(m) {
       if (!HUD_MODE) loadModels();
       if (m.tools) {
         document.getElementById("agentNote").textContent =
-          "agent tools (read-tier only): " + m.tools.join(", ") +
-          "  ·  memory: " + (m.context_turns || 0) + " carried turn(s)";
+          "agent tools: " + m.tools.join(", ") +
+          "  ·  writes queue for your confirmation  ·  memory: " + (m.context_turns || 0) + " carried turn(s)";
       }
       break;
     case "state":
@@ -904,6 +916,12 @@ function handleOp(m) {
       if (m.role === "assistant" && m.route) {
         document.getElementById("engineNote").textContent = m.engine + " \u00b7 " + m.route;
       }
+      break;
+    case "write_confirm":
+      renderWriteConfirm(m);
+      break;
+    case "write_resolved":
+      resolveWriteCard(m.token, m.approved, m.outcome);
       break;
     case "trace": renderTrace(m.trace); break;
     case "tts_flush": flushSentence(m.index, m.ms); break;
@@ -1093,6 +1111,35 @@ function renderAudit(data) {
 document.getElementById("btnRefreshP4").onclick = loadP4;
 
 /* ---------------------------------------------------------------- chat */
+function renderWriteConfirm(pw) {
+  const chat = document.getElementById("chat"); if (!chat) return;
+  // A later turn re-emits still-pending writes; skip ones with a live card.
+  if (document.getElementById("wrc_" + pw.token)) return;
+  const card = document.createElement("div");
+  card.className = "msg write-confirm"; card.id = "wrc_" + pw.token;
+  const label = pw.auditor === "hold" ? "JARVIS is holding this one" : "JARVIS wants to do this";
+  card.innerHTML =
+    '<div class="who">Write <span class="badge">' + (pw.tier || "write") + "</span></div>" +
+    '<div class="body">' +
+      '<div class="wc-line">' + label + " — " + (pw.reason || "confirm to continue") + "</div>" +
+      '<div class="wc-what">' + (pw.summary || pw.action) + "</div>" +
+      '<div class="wc-actions">' +
+        '<button data-act="yes">Confirm</button>' +
+        '<button data-act="no">Cancel</button>' +
+      "</div>" +
+    "</div>";
+  card.querySelector('[data-act="yes"]').onclick = () =>
+    wsSend("confirm_write", { token: pw.token, approved: true });
+  card.querySelector('[data-act="no"]').onclick = () =>
+    wsSend("confirm_write", { token: pw.token, approved: false });
+  chat.appendChild(card); chat.scrollTop = chat.scrollHeight;
+}
+function resolveWriteCard(token, approved, outcome) {
+  const card = document.getElementById("wrc_" + token); if (!card) return;
+  const btns = card.querySelector(".wc-actions");
+  if (btns) btns.innerHTML = approved ? '<span class="wc-done">Saved.</span>' : '<span class="wc-done">Cancelled.</span>';
+  card.classList.add(outcome && outcome.error ? "failed" : "done");
+}
 function addMsg(role, text, engine, isError) {
   const hint = document.getElementById("chathint");
   if (role !== "error" && hint && hint.parentNode) hint.remove();

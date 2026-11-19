@@ -1,14 +1,17 @@
 """Agent tools the orb conversation may use (design §6.7 read tier).
 
-The orb used to be a chat box with no hands: projects, deadlines and indexed
-documents existed in the runtime but were invisible to it. This module exposes
-a *read-only* tool set to the model during an orb turn, and every tool is
-checked through ``jarvis.security.tiers.classify`` before it is offered at all
-— so the tier policy that the Settings panel displays is the same policy the
-orb actually runs, not a mirror of the console's.
+The orb exposes a *read-only* tool set to the model during a turn, and every
+read tool is checked through ``jarvis.security.tiers.classify`` before it is
+offered at all — so the tier policy the Settings panel displays is the same
+policy the orb actually runs, not a mirror of the console's.
 
-Writes stay where they belong: the console secured-ask path, with the
-ConfirmGate and the audit chain. The orb deliberately has no write tool.
+Stage 2 adds one WRITE-tier tool, ``jarvis_projects_write``: the model may
+*propose* a write to the local project/deadline store, but the tool call is
+side-effect free — it only registers a pending write and returns a
+confirmation token. The mutation runs later through the host's confirm path
+(one-tap for WRITE, typed phrase for DESTRUCTIVE) into the same hash-chained
+AuditLogger the console ConfirmGate uses. ``execute()`` still refuses every
+real mutation: the only non-READ tool it will run is that safe propose call.
 """
 from __future__ import annotations
 
@@ -26,6 +29,12 @@ _logger = logging.getLogger(__name__)
 # Names only. Execution is local and read-only; nothing here mutates state.
 _READ_TOOL_NAMES = ("jarvis_projects_read", "jarvis_rag_search")
 
+# Non-READ tools execute() will still run, because their fn is a side-effect
+# free *proposer*: it only queues a pending write for host confirmation. The
+# list must stay tiny and explicit — a new write tool is not callable here
+# until it is added to this tuple and proven to do no mutation on its own.
+_PROPOSE_ONLY_TOOLS = ("jarvis_projects_write",)
+
 
 @dataclass(slots=True)
 class AgentTool:
@@ -36,13 +45,11 @@ class AgentTool:
     tier: Tier
 
 
-def _projects_read(view: str, project_name: str = "") -> str:
+def _project_store():
+    """The same local SQLite store the read tool opens, so a write lands where
+    the assistant just read from. Callers get a ProjectStore, not a path."""
     import os
 
-    # Default to *this repo's* root, not the cwd: the orb shell may launch the
-    # server from orb/, and a cwd-based default would silently open (and create)
-    # an empty database — the assistant would truthfully report "no deadlines"
-    # that the owner never registered.
     root = Path(os.environ.get("JARVIS_WORKSPACE_ROOT") or Path(__file__).resolve().parents[2])
     db = Path(os.environ.get("JARVIS_PROJECT_DB") or root / "jarvis_projects.db")
     import sys
@@ -51,7 +58,15 @@ def _projects_read(view: str, project_name: str = "") -> str:
         sys.path.insert(0, str(root))
     from project_store import ProjectStore
 
-    store = ProjectStore(db)
+    return ProjectStore(db)
+
+
+def _projects_read(view: str, project_name: str = "") -> str:
+    # Default to *this repo's* root, not the cwd: the orb shell may launch the
+    # server from orb/, and a cwd-based default would silently open (and create)
+    # an empty database — the assistant would truthfully report "no deadlines"
+    # that the owner never registered.
+    store = _project_store()
     if view == "projects":
         return json.dumps(store.list_projects(), ensure_ascii=False)
     if view == "due_soon":
@@ -161,6 +176,37 @@ def _notion_read(view: str = "search", query: str = "", limit: int = 8) -> str:
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
     return json.dumps({"view": view, "items": items}, ensure_ascii=False)
+
+
+# The write surface (stage 2): a WRITE-tier tool the model may *propose*. Its
+# function is side-effect free — it registers a pending write and returns a
+# confirmation token; the mutation runs later in SecuredWrites.resolve(),
+# only after the host surfaces the token and the user confirms.
+_WRITE_EXECUTOR = None
+
+
+def configure_writes(executor) -> None:
+    """executor is a SecuredWrites. Until a host injects one, the write tool
+    reports that writes are not wired in here (the console does this; the
+    telegram host will too)."""
+    global _WRITE_EXECUTOR
+    _WRITE_EXECUTOR = executor
+
+
+def _projects_write(action: str = "", name: str = "", path: str = "",
+                    project_name: str = "", title: str = "", due_date: str = "",
+                    deadline_id=None, status: str = "") -> str:
+    """Propose one write to the local project/deadline store (never executes)."""
+    if _WRITE_EXECUTOR is None:
+        return json.dumps({"error": "writes are not wired up in this host"})
+    params: Dict[str, Any] = {"action": action}
+    for key, val in (("name", name), ("path", path), ("project_name", project_name),
+                     ("title", title), ("due_date", due_date),
+                     ("deadline_id", deadline_id), ("status", status)):
+        if val not in (None, ""):
+            params[key] = val
+    out = _WRITE_EXECUTOR.propose(params)
+    return json.dumps(out, ensure_ascii=False)
 
 
 def _current_time() -> str:
@@ -363,6 +409,37 @@ def build_tools() -> List[AgentTool]:
     )
     tools.extend([t for t in (projects, rag, google, web, files_read, files_list,
                                files_search, notion, clock, screen) if t is not None])
+
+    # Stage 2: one WRITE-tier tool. It is advertised (so the model knows it can
+    # act), but its fn is a side-effect-free proposer — running it only queues
+    # a pending write. It is not built through _check_tier, which is READ-only.
+    tools.append(AgentTool(
+        name="jarvis_projects_write",
+        description=(
+            "Propose one write to the user's local projects/deadlines store. "
+            "action='add_project' (needs name, path); action='add_deadline' "
+            "(needs project_name, title, due_date); action='set_deadline_status' "
+            "(needs deadline_id, status open/completed/cancelled). This only "
+            "queues the change: it returns a confirmation token and a summary, "
+            "and NOTHING is saved until the user confirms it in the UI. Always "
+            "tell the user the write is waiting on their confirmation."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add_project", "add_deadline", "set_deadline_status"]},
+                "name": {"type": "string"},
+                "path": {"type": "string"},
+                "project_name": {"type": "string"},
+                "title": {"type": "string"},
+                "due_date": {"type": "string", "description": "ISO date like 2026-12-01"},
+                "deadline_id": {"type": "integer"},
+                "status": {"type": "string", "enum": ["open", "completed", "cancelled"]},
+            },
+            "required": ["action"],
+        },
+        fn=_projects_write,
+        tier=Tier.WRITE,
+    ))
     return tools
 
 
@@ -377,11 +454,14 @@ def tool_schemas(tools: List[AgentTool]) -> List[Dict[str, Any]]:
 
 
 def execute(tools: List[AgentTool], name: str, arguments: Any) -> str:
-    """Run one tool call. Anything unknown or non-READ becomes an error string."""
+    """Run one tool call. Reads run free; only the safe *proposer* below runs
+    for writes. Any other non-READ tool becomes an error string — a real
+    mutation never happens here, it waits in a pending write for confirmation."""
     tool = next((t for t in tools if t.name == name), None)
     if tool is None:
         return json.dumps({"error": f"tool {name!r} is not available in the orb (read-only tier)"})
-    if classify(PlannedAction(tool=name, params={})) is not Tier.READ:
+    tier = classify(PlannedAction(tool=name, params={}))
+    if tier is not Tier.READ and name not in _PROPOSE_ONLY_TOOLS:
         return json.dumps({"error": f"tool {name!r} refused: not read-tier"})
     if isinstance(arguments, str):
         try:

@@ -7,9 +7,12 @@ from jarvis.channels.telegram import TelegramBot
 
 
 class FakeBrain:
-    def __init__(self, answer="hello from JARVIS"):
+    def __init__(self, answer="hello from JARVIS", pending=None, write_results=None):
         self.answer = answer
         self.calls = []
+        self._pending = pending or []
+        self.write_results = write_results or {}
+        self.resolves = []
 
     def run(self, text, memory=(), force_cloud=False):
         self.calls.append({"text": text, "memory": list(memory), "force_cloud": force_cloud})
@@ -21,11 +24,36 @@ class FakeBrain:
         r.answer = self.answer
         return r
 
+    def pending_writes(self):
+        return list(self._pending)
 
-def make_bot(tmp_path, answer="hello from JARVIS", **kw):
+    def resolve_write(self, token, approved):
+        self.resolves.append((token, approved))
+        return self.write_results.get((token, approved),
+                                      {"token": token, "approved": approved,
+                                       "outcome": {"done": True}})
+
+
+PENDING = {
+    "token": "pw_ab12",
+    "action": "jarvis_projects_write",
+    "params": {"action": "add_project", "name": "Alpha", "path": "/tmp/alpha"},
+    "tier": "write",
+    "auditor": "approve",
+    "reason": "local project store only",
+    "state": "pending",
+    "summary": "add project 'Alpha' at '/tmp/alpha'",
+}
+
+
+def _sent_texts(bot):
+    return [p.get("text", "") for m, p in bot._sent if m == "sendMessage"]
+
+
+def make_bot(tmp_path, answer="hello from JARVIS", pending=None, write_results=None, **kw):
     bot = TelegramBot(
         token="123:fake",
-        brain=FakeBrain(answer),
+        brain=FakeBrain(answer, pending=pending, write_results=write_results),
         history_path=tmp_path / "hist.json",
         **kw,
     )
@@ -97,3 +125,62 @@ def test_history_is_bounded_per_chat(tmp_path):
     for i in range(20):
         bot.handle_message("c", f"q{i}")
     assert len(bot._history["c"]) <= 10
+
+
+# ------------------------------------------------------------------ writes
+
+def test_pending_writes_are_announced_after_a_turn(tmp_path):
+    bot = make_bot(tmp_path, pending=[PENDING])
+    bot.handle_message("c", "add a project called Alpha in C:/tmp/alpha")
+    texts = _sent_texts(bot)
+    announcement = next(t for t in texts if "waiting on your confirmation" in t)
+    assert "pw_ab12" in announcement
+    assert "add project 'Alpha' at '/tmp/alpha'" in announcement
+    assert "yes" in announcement and "no" in announcement
+    assert bot.brain.resolves == []
+
+
+def test_confirm_reply_resolves_with_yes(tmp_path):
+    bot = make_bot(tmp_path, write_results={("pw_ab12", True):
+                                             {"token": "pw_ab12", "approved": True, "outcome": {"done": True}}})
+    bot.handle_message("c", "yes pw_ab12")
+    assert bot.brain.resolves == [("pw_ab12", True)]
+    assert "Confirmed pw_ab12" in _sent_texts(bot)[0]
+    assert bot.brain.calls == []  # the brain never saw the reply
+
+
+def test_cancel_reply_resolves_with_no(tmp_path):
+    bot = make_bot(tmp_path, write_results={("pw_ab12", False):
+                                             {"token": "pw_ab12", "approved": False, "outcome": {"skipped": True}}})
+    bot.handle_message("c", "no pw_ab12")
+    assert bot.brain.resolves == [("pw_ab12", False)]
+    assert "Cancelled pw_ab12" in _sent_texts(bot)[0]
+
+
+def test_confirm_reply_surfaces_a_resolve_error(tmp_path):
+    bot = make_bot(tmp_path, write_results={("pw_nope", True): {"error": "unknown write token 'pw_nope'"}})
+    bot.handle_message("c", "yes pw_nope")
+    assert "unknown write token" in _sent_texts(bot)[0]
+    assert bot.brain.resolves == [("pw_nope", True)]
+
+
+def test_confirm_reply_flags_a_failed_outcome(tmp_path):
+    bot = make_bot(tmp_path, write_results={("pw_ab12", True):
+                                             {"token": "pw_ab12", "approved": True,
+                                              "outcome": {"error": "no such deadline"}}})
+    bot.handle_message("c", "YES pw_ab12")  # case-insensitive
+    assert bot.brain.resolves == [("pw_ab12", True)]
+    assert "the write failed" in _sent_texts(bot)[0]
+
+
+def test_no_pending_writes_means_no_announcement(tmp_path):
+    bot = make_bot(tmp_path)
+    bot.handle_message("c", "just a question")
+    assert all("waiting on your confirmation" not in t for t in _sent_texts(bot))
+
+
+def test_bare_yes_is_treated_as_chat_not_a_confirm(tmp_path):
+    bot = make_bot(tmp_path, pending=[PENDING])
+    bot.handle_message("c", "yes")
+    assert bot.brain.calls[0]["text"] == "yes"
+    assert bot.brain.resolves == []

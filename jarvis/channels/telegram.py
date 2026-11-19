@@ -7,6 +7,13 @@ send-only when it is missing). Inbound text goes through the same
 (web search, Notion, Google, projects), escalation — so a chat message gets
 the same answers a voice question would.
 
+Writes the brain proposes (jarvis_projects_write) never run on their own.
+After each turn the bot lists the pending writes (token, summary, auditor
+reason) and the user settles each one by replying ``yes <token>`` to confirm
+or ``no <token>`` to cancel; the decision goes through the same host
+confirmation surface (Brain.resolve_write) the orb UI uses, and lands in the
+shared audit chain.
+
 Setup (owner, one time):
   1. Talk to @BotFather on Telegram, /newbot, copy the token.
   2. Add TELEGRAM_BOT_TOKEN=123456:ABC... to .env
@@ -19,6 +26,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from pathlib import Path
@@ -31,11 +39,16 @@ _API = "https://api.telegram.org"
 _MAX_LEN = 4096
 _HISTORY_TURNS = 5  # user+assistant pairs kept per chat
 
+# "yes pw_abc123..." / "no pw_abc123..." — the two words that settle a write.
+_CONFIRM_RE = re.compile(r"^(yes|no)\s+(\S+)$", re.IGNORECASE)
+
 _HELP = (
     "I'm JARVIS. Send me a question and I answer with my usual tools "
     "(projects, your documents, Google, Notion, web search).\n"
     "Commands: /reset clears this chat's memory with me; /cloud <question> "
-    "forces the stronger cloud model for one answer."
+    "forces the stronger cloud model for one answer.\n"
+    "Writes I propose wait for you: I list each one with a token, then "
+    "reply yes <token> to confirm it or no <token> to cancel it."
 )
 
 
@@ -145,6 +158,10 @@ class TelegramBot:
         if self.brain is None:
             self.brain = _lazy_brain()
 
+        confirm = _CONFIRM_RE.match(text)
+        if confirm:
+            return self._resolve_confirm_reply(chat_id, confirm.group(1).lower() == "yes", confirm.group(2))
+
         try:
             self.api("sendChatAction", chat_id=chat_id, action="typing")
         except Exception:
@@ -165,7 +182,57 @@ class TelegramBot:
                                             {"role": "assistant", "content": reply}])[-2 * _HISTORY_TURNS:]
         self._save_history()
         self.send(chat_id, reply)
+        self._announce_pending_writes(chat_id)
         return reply
+
+    # -- write confirmation ---------------------------------------------------
+
+    def _announce_pending_writes(self, chat_id: str) -> None:
+        """After a brain turn, list the writes awaiting confirmation, if any.
+
+        The brain stays the source of truth (SecuredWrites.pending via
+        Brain.pending_writes); this host only offers its own yes/no reply.
+        """
+        pending = getattr(self.brain, "pending_writes", None)
+        if not callable(pending):
+            return
+        try:
+            items = pending() or []
+        except Exception:
+            _logger.exception("listing pending writes failed")
+            return
+        if not items:
+            return
+        lines = [f"{len(items)} write{'s' if len(items) > 1 else ''} are waiting on your confirmation. "
+                 "Reply yes <token> to confirm, no <token> to cancel:"]
+        for pw in items:
+            lines.append(f"- {pw.get('token', '?')}: {pw.get('summary', '?')} "
+                         f"(auditor {pw.get('auditor', '?')}: {pw.get('reason', '')})")
+        self.send(chat_id, "\n".join(lines))
+
+    def _resolve_confirm_reply(self, chat_id: str, approved: bool, token: str) -> None:
+        """Settle one queued write through the shared host-confirmation surface."""
+        resolve = getattr(self.brain, "resolve_write", None)
+        if not callable(resolve):
+            self.send(chat_id, "This bot is not wired to confirm writes.")
+            return None
+        try:
+            result = resolve(token, approved)
+        except Exception as exc:
+            _logger.exception("write confirmation failed")
+            self.send(chat_id, f"Confirming that write failed ({exc.__class__.__name__}).")
+            return None
+        outcome = result.get("outcome", {}) if isinstance(result, dict) else {}
+        if isinstance(result, dict) and result.get("error"):
+            msg = f"I could not resolve {token}: {result['error']}"
+        elif not approved:
+            msg = f"Cancelled {token} — nothing was written."
+        elif isinstance(outcome, dict) and outcome.get("error"):
+            msg = f"Confirmed {token}, but the write failed: {outcome['error']}"
+        else:
+            msg = f"Confirmed {token} — the write is done."
+        self.send(chat_id, msg)
+        return None
 
     # -- poll loop ------------------------------------------------------------
 

@@ -207,6 +207,31 @@ def test_double_resolve_is_refused(editor, target):
     assert "error" in editor.resolve(r["token"], True, CONFIRM_PHRASE)
 
 
+def test_shouted_confirmation_still_settles(editor, target):
+    """The confirmation patterns carry re.IGNORECASE, which also uppercases the
+    token they capture, so a shouted phrase arrives as FE_AB12. The executor
+    must not report that as an unknown token.
+
+    Named without the word "token": pytest builds tmp_path from this function's
+    name, and is_sensitive() substring-matches the whole path — a directory
+    called ..._token_... would be refused as a credential file before the
+    behaviour under test ever ran.
+    """
+    r = editor.propose({"action": "replace", "path": str(target),
+                        "old_string": "beta", "new_string": "BETA"})
+    assert editor.resolve(r["token"].upper(), True, "YES, DO IT")["outcome"]["applied"] is True
+    assert target.read_text() == "alpha\nBETA\ngamma\n"
+
+
+def test_shouted_confirmation_can_be_undone(editor, target):
+    original = target.read_text()
+    r = editor.propose({"action": "replace", "path": str(target),
+                        "old_string": "beta", "new_string": "BETA"})
+    editor.resolve(r["token"], True, CONFIRM_PHRASE)
+    assert editor.undo(r["token"].upper())["undone"] is True
+    assert target.read_text() == original
+
+
 # -------------------------------------------------- confirmation grammar (hosts)
 #
 # These import the real grammar from file_edit rather than re-declaring a copy.
@@ -277,6 +302,25 @@ def test_bare_yes_never_confirms_an_edit():
     assert CONFIRM_PHRASE in hint and token in hint
 
 
+def test_misplaced_phrase_is_handled_offline_in_both_hosts():
+    """'yes, do it <not-an-edit-token>' must not become a turn in either host:
+    the model cannot apply an edit, so it could only narrate one it never made.
+    Both hosts must answer it with the same hint."""
+    from jarvis.security.file_edit import (
+        CONFIRM_PHRASE,
+        EDIT_CONFIRM_RE,
+        EDIT_PHRASE_MISPLACED_RE,
+    )
+
+    write_token = "pw_ab12"
+    text = f"{CONFIRM_PHRASE} {write_token}"
+    # It must not be taken for an edit confirmation...
+    assert not EDIT_CONFIRM_RE.match(text)
+    # ...but it must be catchable, so a host can answer instead of running a turn.
+    m = EDIT_PHRASE_MISPLACED_RE.match(text)
+    assert m and m.group(2) == write_token
+
+
 def test_both_hosts_share_the_one_grammar():
     """Defining the grammar in file_edit is the whole point: both hosts import
     the same objects, so they cannot disagree about a confirmation."""
@@ -287,6 +331,9 @@ def test_both_hosts_share_the_one_grammar():
     assert tg._EDIT_CONFIRM_RE is file_edit.EDIT_CONFIRM_RE
     assert tg._CONFIRM_RE is file_edit.WRITE_CONFIRM_RE
     assert orb._EDIT_CONFIRM_RE is file_edit.EDIT_CONFIRM_RE
+    # Both hosts must be able to catch a misplaced phrase, or it runs a turn.
+    assert tg._EDIT_PHRASE_MISPLACED_RE is file_edit.EDIT_PHRASE_MISPLACED_RE
+    assert orb._EDIT_PHRASE_MISPLACED_RE is file_edit.EDIT_PHRASE_MISPLACED_RE
 
 
 def test_wrong_phrase_from_chat_box_leaves_the_token_settleable(editor, target):

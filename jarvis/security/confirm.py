@@ -126,6 +126,7 @@ class SecuredWrites:
         This is the one place in the whole write path that touches the store,
         so it is also the one place the audit chain records the decision.
         """
+        token = (token or "").strip().lower()
         with self._lock:
             pw = self._pending.get(token)
             if pw is None:

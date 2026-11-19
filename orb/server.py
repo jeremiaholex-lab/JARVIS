@@ -84,6 +84,7 @@ from jarvis.security.file_edit import (
     EDIT_BARE_YES_RE,
     EDIT_CANCEL_RE,
     EDIT_CONFIRM_RE,
+    EDIT_PHRASE_MISPLACED_RE,
 )
 OWW_FRAME = 1280          # 80 ms
 MAX_UTTERANCE_S = 30
@@ -99,6 +100,7 @@ WAKE_MODEL = "hey jarvis"
 _EDIT_CONFIRM_RE = EDIT_CONFIRM_RE
 _EDIT_CANCEL_RE = EDIT_CANCEL_RE
 _EDIT_BARE_YES_RE = EDIT_BARE_YES_RE
+_EDIT_PHRASE_MISPLACED_RE = EDIT_PHRASE_MISPLACED_RE
 
 SYSTEM_PROMPT = (
     "Your assistant name and identity is JARVIS, a personal voice assistant shown as a floating holo-orb. "
@@ -1294,6 +1296,17 @@ def build_app():
                     c.remember("assistant", note, "edits")
                     c.emit(q, "edit_resolved", token=token, approved=confirmed,
                            outcome=result)
+                    c.emit(q, "chat", role="system", text=note, engine="edits")
+                    continue
+                misplaced = _EDIT_PHRASE_MISPLACED_RE.match(text)
+                if misplaced:
+                    # "yes, do it pw_x": the phrase is for edits, but the token
+                    # is not one. Answer offline so the model cannot claim it
+                    # applied something. The Telegram host does the same.
+                    note = (f"{misplaced.group(2)} is not a file edit token. "
+                            "Edits are confirmed with 'yes, do it fe_…'.")
+                    c.remember("user", text)
+                    c.remember("assistant", note, "edits")
                     c.emit(q, "chat", role="system", text=note, engine="edits")
                     continue
                 c.thinking = True

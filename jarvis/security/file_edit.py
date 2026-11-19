@@ -59,6 +59,19 @@ WRITE_CONFIRM_RE = re.compile(r"^(yes|no|cancel)\s+(\S+)$", re.IGNORECASE)
 
 _VALID_ACTIONS = ("replace", "rewrite", "create")
 
+
+def _norm_token(token: str) -> str:
+    """Tokens are minted lowercase by secrets.token_hex; match them that way.
+
+    Confirmation patterns carry re.IGNORECASE so a shouted phrase still works,
+    but that flag also applies to the token they capture, so "YES, DO IT FE_X"
+    yields an uppercase token. Looking it up verbatim would report an unknown
+    token for one that is plainly pending, so normalise here — once, at the
+    executor, rather than in each host.
+    """
+    return (token or "").strip().lower()
+
+
 _MAX_EDIT_BYTES = 200_000
 _MAX_DIFF_CHARS = 4000
 _REFUSED_PARTS = {".git", ".hg", ".svn", ".openjarvis", "node_modules", "__pycache__", ".venv"}
@@ -156,7 +169,7 @@ class SecuredFileEdits:
 
     def has(self, token: str) -> bool:
         with self._lock:
-            return token in self._pending
+            return _norm_token(token) in self._pending
 
     def resolve(self, token: str, approved: bool, confirm_phrase: str = "") -> Dict[str, Any]:
         """Apply or reject a pending edit. This is the only writer in the path.
@@ -165,6 +178,7 @@ class SecuredFileEdits:
         missing phrase does NOT consume the token — the user can still settle
         it, which matters when a host renders the wrong button by mistake.
         """
+        token = _norm_token(token)
         with self._lock:
             pe = self._pending.get(token)
             if pe is None:
@@ -232,6 +246,7 @@ class SecuredFileEdits:
         Not a durable backup — git is the real undo for tracked files — but it
         makes an accidental confirmation recoverable without leaving JARVIS.
         """
+        token = _norm_token(token)
         with self._lock:
             pe = self._applied.get(token)
             if pe is None:

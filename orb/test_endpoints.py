@@ -32,6 +32,8 @@ def test_agent_endpoint_is_json_serializable():
         data = response.json()
         assert "error" not in data, data.get("error")
         assert set(data["tools"]) >= {"jarvis_projects_read", "jarvis_rag_search"}
+        # both proposers are advertised, but neither mutates on its own
+        assert {"jarvis_projects_write", "jarvis_file_edit"} <= set(data["tools"])
         for key in ("user_model", "memory", "models", "alerts_available"):
             assert key in data or key == "alerts_available", key
         # facts must be plain dicts, not dataclass reprs

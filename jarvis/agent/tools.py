@@ -11,7 +11,12 @@ side-effect free — it only registers a pending write and returns a
 confirmation token. The mutation runs later through the host's confirm path
 (one-tap for WRITE, typed phrase for DESTRUCTIVE) into the same hash-chained
 AuditLogger the console ConfirmGate uses. ``execute()`` still refuses every
-real mutation: the only non-READ tool it will run is that safe propose call.
+real mutation: the only non-READ tools it will run are the safe proposers.
+
+Stage 3 adds ``jarvis_file_edit`` on the same pattern but a DESTRUCTIVE tier:
+it proposes an edit to one text file, returns a unified diff, and the edit
+runs only when the user types the confirmation phrase. The gate is enforced
+in the executor, not the UI.
 """
 from __future__ import annotations
 
@@ -30,10 +35,10 @@ _logger = logging.getLogger(__name__)
 _READ_TOOL_NAMES = ("jarvis_projects_read", "jarvis_rag_search")
 
 # Non-READ tools execute() will still run, because their fn is a side-effect
-# free *proposer*: it only queues a pending write for host confirmation. The
+# free *proposer*: it only queues a pending change for host confirmation. The
 # list must stay tiny and explicit — a new write tool is not callable here
 # until it is added to this tuple and proven to do no mutation on its own.
-_PROPOSE_ONLY_TOOLS = ("jarvis_projects_write",)
+_PROPOSE_ONLY_TOOLS = ("jarvis_projects_write", "jarvis_file_edit")
 
 
 @dataclass(slots=True)
@@ -183,6 +188,7 @@ def _notion_read(view: str = "search", query: str = "", limit: int = 8) -> str:
 # confirmation token; the mutation runs later in SecuredWrites.resolve(),
 # only after the host surfaces the token and the user confirms.
 _WRITE_EXECUTOR = None
+_FILE_EDITOR = None
 
 
 def configure_writes(executor) -> None:
@@ -191,6 +197,13 @@ def configure_writes(executor) -> None:
     telegram host will too)."""
     global _WRITE_EXECUTOR
     _WRITE_EXECUTOR = executor
+
+
+def configure_file_edits(editor) -> None:
+    """editor is a SecuredFileEdits. Same contract as configure_writes: no
+    host wiring means the proposer reports that edits are unavailable."""
+    global _FILE_EDITOR
+    _FILE_EDITOR = editor
 
 
 def _projects_write(action: str = "", name: str = "", path: str = "",
@@ -206,6 +219,22 @@ def _projects_write(action: str = "", name: str = "", path: str = "",
         if val not in (None, ""):
             params[key] = val
     out = _WRITE_EXECUTOR.propose(params)
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _file_edit(action: str = "", path: str = "", old_string: str = "",
+               new_string: str = "", content: str = "") -> str:
+    """Propose one edit to a text file (never executes). Returns the diff."""
+    if _FILE_EDITOR is None:
+        return json.dumps({"error": "file edits are not wired up in this host"})
+    params: Dict[str, Any] = {"action": action, "path": path}
+    if old_string:
+        params["old_string"] = old_string
+    if new_string:
+        params["new_string"] = new_string
+    if content:
+        params["content"] = content
+    out = _FILE_EDITOR.propose(params)
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -439,6 +468,37 @@ def build_tools() -> List[AgentTool]:
         },
         fn=_projects_write,
         tier=Tier.WRITE,
+    ))
+
+    # Stage 3: a DESTRUCTIVE-tier file-edit proposer. Advertised so the model
+    # can propose a concrete change, but running it only computes a diff and
+    # queues it — the file is untouched until the user types the phrase.
+    tools.append(AgentTool(
+        name="jarvis_file_edit",
+        description=(
+            "Propose an edit to ONE text file on the user's computer. Read the file "
+            "with read_file first and copy old_string exactly from it. "
+            "action='replace' (needs old_string, new_string: old_string must appear "
+            "exactly once — include surrounding lines for uniqueness); "
+            "action='rewrite' (needs content: whole new file body); "
+            "action='create' (needs content: a new file; never overwrites). "
+            "This only computes a diff and returns a token — NOTHING is written. "
+            "The user must type a confirmation phrase in the UI before it applies. "
+            "Show them the diff and say it is waiting on their confirmation."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["replace", "rewrite", "create"]},
+                "path": {"type": "string", "description": "absolute path to the file"},
+                "old_string": {"type": "string", "description": "exact existing text (replace)"},
+                "new_string": {"type": "string", "description": "replacement text (replace)"},
+                "content": {"type": "string", "description": "full body (rewrite/create)"},
+            },
+            "required": ["action", "path"],
+        },
+        fn=_file_edit,
+        tier=Tier.DESTRUCTIVE,
     ))
     return tools
 

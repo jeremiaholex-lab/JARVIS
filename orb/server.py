@@ -83,6 +83,12 @@ TAIL_S = 1.2              # silence needed to close a VAD segment (relaxed from 
 VAD_POLL_S = 0.8
 WAKE_MODEL = "hey jarvis"
 
+# Typed confirmation for a destructive file edit, sent from the chat box:
+# "yes, do it fe_ab12". Parsed offline so a phrase never reaches the model —
+# the model must not be able to answer its own confirmation prompt.
+_EDIT_CONFIRM_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
+_EDIT_CANCEL_RE = re.compile(r"^(no|cancel)\s+(fe_\w+)$", re.IGNORECASE)
+
 SYSTEM_PROMPT = (
     "Your assistant name and identity is JARVIS, a personal voice assistant shown as a floating holo-orb. "
     "This identity is separate from the underlying AI model or provider. If asked your name, say JARVIS; "
@@ -372,10 +378,13 @@ class AgentContext:
         self.tools = build_tools()
         self.schemas = tool_schemas(self.tools)
         from jarvis.agent.tools import configure_vision, configure_writes
+        from jarvis.agent.tools import configure_file_edits
 
         configure_vision(self._vision_context)
         self.writes = self._build_writes()
         configure_writes(self.writes)
+        self.file_edits = self._build_file_edits()
+        configure_file_edits(self.file_edits)
         db = governance_home() / "memory.db"
         self.memory = Memory(db)
         self.user_model = UserModel(db)
@@ -425,6 +434,29 @@ class AgentContext:
     def resolve_write(self, token: str, approved: bool):
         """Confirm or reject a queued write — the only mutation in the path."""
         return self.writes.resolve(token, approved)
+
+    def _build_file_edits(self):
+        """The DESTRUCTIVE-tier file-edit executor (typed phrase to confirm)."""
+        from jarvis.security.auditor import Auditor
+        from jarvis.security.file_edit import SecuredFileEdits
+
+        try:
+            from openjarvis.security.audit import AuditLogger
+            audit = AuditLogger(db_path=audit_db())
+        except Exception:
+            audit = None
+        return SecuredFileEdits(Auditor(use_llm=False), audit_logger=audit)
+
+    def pending_edits(self):
+        """UI-safe view of the file edits awaiting confirmation (with diffs)."""
+        return self.file_edits.pending()
+
+    def resolve_edit(self, token: str, approved: bool, confirm_phrase: str = ""):
+        """Confirm (with the typed phrase) or reject a queued file edit."""
+        return self.file_edits.resolve(token, approved, confirm_phrase)
+
+    def undo_edit(self, token: str):
+        return self.file_edits.undo(token)
 
     @staticmethod
     def _measured_speed() -> float | None:
@@ -716,7 +748,8 @@ def build_app():
             "mode": mode,
             "note": ("enforce" if mode == "enforce" else
                      "observe — tiers gate the console secured-ask; the orb "
-                     "conversation is limited to read-tier tools"),
+                     "conversation may read freely and only *propose* writes "
+                     "(project rows: one-tap; file edits: typed phrase)"),
             "approved_skills": len([e for e in ledger.values() if e.get("status") == "approved"]),
             "audit_db": str(audit_db()),
         })
@@ -908,6 +941,10 @@ def build_app():
         # not run until they resolve this token.
         for pw in ctx.pending_writes():
             c.emit(q, "write_confirm", **pw)
+        # Same for a proposed file edit (jarvis_file_edit): the card carries the
+        # diff and requires the typed phrase. Nothing is on disk until then.
+        for pe in ctx.pending_edits():
+            c.emit(q, "edit_confirm", **pe)
         # Deriving durable facts costs a model call; do it after the reply has
         # been spoken, never in front of it.
         asyncio.create_task(_learn_about_user(ctx, text))
@@ -1209,6 +1246,30 @@ def build_app():
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
+                # A file-edit confirmation typed in the chat box is settled
+                # here, never handed to the model: a model must not be able to
+                # answer its own confirmation prompt.
+                edit_confirm = _EDIT_CONFIRM_RE.match(text)
+                edit_cancel = _EDIT_CANCEL_RE.match(text)
+                if edit_confirm or edit_cancel:
+                    confirmed = bool(edit_confirm)
+                    phrase = edit_confirm.group(1) if confirmed else ""
+                    token = (edit_confirm or edit_cancel).group(2)
+                    result = await asyncio.to_thread(
+                        agent_context().resolve_edit, token, confirmed, phrase)
+                    if result.get("error"):
+                        note = f"Edit not applied: {result['error']}"
+                    elif not confirmed:
+                        note = "Edit cancelled."
+                    else:
+                        oc = result.get("outcome") or {}
+                        note = (f"Edited {oc.get('path', 'the file')} "
+                                f"(+{oc.get('added', 0)} -{oc.get('removed', 0)}).")
+                    c.remember("user", text)
+                    c.emit(q, "edit_resolved", token=token, approved=confirmed,
+                           outcome=result)
+                    c.emit(q, "chat", role="system", text=note, engine="edits")
+                    continue
                 c.thinking = True
                 c.emit(q, "state", state="thinking")
                 trace: list[dict] = []
@@ -1238,6 +1299,31 @@ def build_app():
                 else:
                     note = "Write saved to your projects."
                 c.emit(q, "chat", role="system", text=note, engine="writes")
+            elif op == "confirm_edit":
+                # Resolve a proposed file edit. The phrase is checked in the
+                # executor, so a host that forgot to ask still cannot approve.
+                token = msg.get("token", "")
+                approved = bool(msg.get("approved"))
+                phrase = str(msg.get("phrase") or "")
+                result = await asyncio.to_thread(
+                    agent_context().resolve_edit, token, approved, phrase)
+                c.emit(q, "edit_resolved", token=token, approved=approved, outcome=result)
+                if result.get("error"):
+                    note = f"Edit not applied: {result['error']}"
+                elif not approved:
+                    note = "Edit cancelled."
+                else:
+                    oc = result.get("outcome") or {}
+                    note = (f"Edited {oc.get('path', 'the file')} "
+                            f"(+{oc.get('added', 0)} -{oc.get('removed', 0)}).")
+                c.emit(q, "chat", role="system", text=note, engine="edits")
+            elif op == "undo_edit":
+                token = msg.get("token", "")
+                result = await asyncio.to_thread(agent_context().undo_edit, token)
+                c.emit(q, "edit_undone", token=token, outcome=result)
+                note = (f"Undo failed: {result['error']}" if result.get("error")
+                        else f"Reverted {result.get('path', 'the file')}.")
+                c.emit(q, "chat", role="system", text=note, engine="edits")
             elif op == "playback_done":
                 if c.watchdog:
                     c.watchdog.cancel()

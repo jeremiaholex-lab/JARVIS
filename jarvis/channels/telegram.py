@@ -14,6 +14,11 @@ or ``no <token>`` to cancel; the decision goes through the same host
 confirmation surface (Brain.resolve_write) the orb UI uses, and lands in the
 shared audit chain.
 
+File edits (jarvis_file_edit) are destructive, so they take a typed phrase
+instead of a tap: the bot posts the diff, and the user replies
+``yes, do it <token>`` to apply it — the phrase is checked by the executor,
+not by this file, so a typo simply leaves the edit pending.
+
 Setup (owner, one time):
   1. Talk to @BotFather on Telegram, /newbot, copy the token.
   2. Add TELEGRAM_BOT_TOKEN=123456:ABC... to .env
@@ -41,6 +46,12 @@ _HISTORY_TURNS = 5  # user+assistant pairs kept per chat
 
 # "yes pw_abc123..." / "no pw_abc123..." — the two words that settle a write.
 _CONFIRM_RE = re.compile(r"^(yes|no)\s+(\S+)$", re.IGNORECASE)
+# "yes, do it fe_abc..." — a file edit is destructive and needs the phrase.
+_EDIT_CONFIRM_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(\S+)$", re.IGNORECASE)
+_EDIT_PHRASE_HINT = (
+    "{token} is a destructive file edit, so 'yes' alone will not apply it. "
+    "Reply 'yes, do it {token}' to confirm it, or 'no {token}' to cancel."
+)
 
 _HELP = (
     "I'm JARVIS. Send me a question and I answer with my usual tools "
@@ -48,7 +59,9 @@ _HELP = (
     "Commands: /reset clears this chat's memory with me; /cloud <question> "
     "forces the stronger cloud model for one answer.\n"
     "Writes I propose wait for you: I list each one with a token, then "
-    "reply yes <token> to confirm it or no <token> to cancel it."
+    "reply yes <token> to confirm it or no <token> to cancel it.\n"
+    "File edits are destructive: I post the diff, and only "
+    "'yes, do it <token>' applies one."
 )
 
 
@@ -158,9 +171,21 @@ class TelegramBot:
         if self.brain is None:
             self.brain = _lazy_brain()
 
+        confirm = _EDIT_CONFIRM_RE.match(text)
+        if confirm:
+            return self._resolve_edit_reply(chat_id, True, confirm.group(2), confirm.group(1))
         confirm = _CONFIRM_RE.match(text)
         if confirm:
-            return self._resolve_confirm_reply(chat_id, confirm.group(1).lower() == "yes", confirm.group(2))
+            approved = confirm.group(1).lower() == "yes"
+            token = confirm.group(2)
+            if token.startswith("fe_"):
+                if approved:
+                    # "yes fe_x" is not enough for a destructive edit: leave it
+                    # pending and say the phrase is required.
+                    self.send(chat_id, _EDIT_PHRASE_HINT.format(token=token))
+                    return None
+                return self._resolve_edit_reply(chat_id, False, token, "")
+            return self._resolve_confirm_reply(chat_id, approved, token)
 
         try:
             self.api("sendChatAction", chat_id=chat_id, action="typing")
@@ -183,6 +208,7 @@ class TelegramBot:
         self._save_history()
         self.send(chat_id, reply)
         self._announce_pending_writes(chat_id)
+        self._announce_pending_edits(chat_id)
         return reply
 
     # -- write confirmation ---------------------------------------------------
@@ -231,6 +257,54 @@ class TelegramBot:
             msg = f"Confirmed {token}, but the write failed: {outcome['error']}"
         else:
             msg = f"Confirmed {token} — the write is done."
+        self.send(chat_id, msg)
+        return None
+
+    def _announce_pending_edits(self, chat_id: str) -> None:
+        """Post the diff of each queued file edit and the phrase that applies it."""
+        pending = getattr(self.brain, "pending_edits", None)
+        if not callable(pending):
+            return
+        try:
+            items = pending() or []
+        except Exception:
+            _logger.exception("listing pending edits failed")
+            return
+        for pe in items:
+            token = pe.get("token", "?")
+            head = (f"Proposed edit {token} — {pe.get('summary', '?')}\n"
+                    "Nothing has changed yet.")
+            diff = pe.get("diff") or "(no diff)"
+            if pe.get("diff_truncated"):
+                diff += "\n… diff truncated"
+            tail = (f"\nReply 'yes, do it {token}' to apply it, "
+                    f"or 'no {token}' to cancel.")
+            self.send(chat_id, f"{head}\n\n{diff}\n{tail}")
+
+    def _resolve_edit_reply(self, chat_id: str, approved: bool, token: str,
+                            phrase: str = "") -> None:
+        """Settle one queued file edit; the executor checks the phrase itself."""
+        resolve = getattr(self.brain, "resolve_edit", None)
+        if not callable(resolve):
+            self.send(chat_id, "This bot is not wired to apply file edits.")
+            return None
+        try:
+            result = resolve(token, approved, phrase)
+        except Exception as exc:
+            _logger.exception("file edit confirmation failed")
+            self.send(chat_id, f"Confirming that edit failed ({exc.__class__.__name__}).")
+            return None
+        if not isinstance(result, dict):
+            self.send(chat_id, f"Unexpected result settling {token}.")
+            return None
+        if result.get("error"):
+            msg = f"I could not apply {token}: {result['error']}"
+        elif not approved:
+            msg = f"Cancelled {token} — the file is unchanged."
+        else:
+            oc = result.get("outcome") or {}
+            msg = (f"Applied {token} to {oc.get('path', 'the file')} "
+                   f"(+{oc.get('added', 0)} -{oc.get('removed', 0)}).")
         self.send(chat_id, msg)
         return None
 

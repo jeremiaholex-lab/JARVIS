@@ -23,6 +23,9 @@ _CONFIRMED_TOOL_TIERS: Dict[str, str] = {
     "file_write_confirmed": "write",
     "shell_exec": "write",
     "jarvis_projects_write": "write",
+    # Stage 3: editing source files produces executable text; a one-tap
+    # confirm is too cheap a gate for that, so it takes the typed phrase.
+    "jarvis_file_edit": "destructive",
     "git_commit": "write",
     "calendar_create": "write",
     "task_create": "write",

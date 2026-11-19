@@ -114,6 +114,7 @@ class Brain:
         self._cloud_key = self._env.get("AGNES_API_KEY", "")
 
         from jarvis.agent.tools import build_tools, tool_schemas, configure_vision, configure_writes
+        from jarvis.agent.tools import configure_file_edits
 
         self.tools = build_tools()
         self.schemas = tool_schemas(self.tools)
@@ -128,6 +129,8 @@ class Brain:
 
         self.writes = self._build_writes()
         configure_writes(self.writes)
+        self.file_edits = self._build_file_edits()
+        configure_file_edits(self.file_edits)
 
     def _build_writes(self):
         """A deterministic-only secured write executor over the local project
@@ -151,6 +154,28 @@ class Brain:
     def resolve_write(self, token: str, approved: bool):
         """Confirm or reject a queued write. The only mutation in the path."""
         return self.writes.resolve(token, approved)
+
+    def _build_file_edits(self):
+        """The DESTRUCTIVE-tier file-edit executor, sharing the same audit DB."""
+        from jarvis.security.auditor import Auditor
+        from jarvis.security.file_edit import SecuredFileEdits
+
+        try:
+            audit = _openjarvis_audit_logger()
+        except Exception:
+            audit = None
+        return SecuredFileEdits(Auditor(use_llm=False), audit_logger=audit)
+
+    def pending_edits(self):
+        """UI-safe view (including the diff) of edits awaiting confirmation."""
+        return self.file_edits.pending()
+
+    def resolve_edit(self, token: str, approved: bool, confirm_phrase: str = ""):
+        """Confirm or reject a queued file edit. Only an approval writes."""
+        return self.file_edits.resolve(token, approved, confirm_phrase)
+
+    def undo_edit(self, token: str):
+        return self.file_edits.undo(token)
 
     @staticmethod
     def _read_env() -> dict:

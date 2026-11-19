@@ -36,7 +36,12 @@ TOOL_GUIDANCE = (
     "You may also propose one write to the user's project/deadline store with "
     "jarvis_projects_write, but it only QUEUES the change — it returns a "
     "confirmation token and nothing is saved until the user confirms it in the "
-    "UI. Never claim a write happened; say it is waiting for their confirmation."
+    "UI. Never claim a write happened; say it is waiting for their confirmation. "
+    "You may propose an edit to one of their text files with jarvis_file_edit, "
+    "but that is a destructive action: read the file first, copy the old text "
+    "exactly, and the tool only returns a diff. Nothing is written until the "
+    "user types the confirmation phrase. Show the diff and never claim the file "
+    "changed."
 )
 
 

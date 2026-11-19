@@ -126,6 +126,17 @@ section h2 .mini { font: 400 11px var(--mono); letter-spacing: .04em; color: var
 .msg.write-confirm .wc-done { font: 500 11px var(--mono); letter-spacing: .05em; color: var(--ink-dim); align-self: center; }
 .msg.write-confirm.failed .wc-done { color: var(--bad); }
 .msg.write-confirm.done .wc-done { color: var(--brass); }
+.msg.edit-confirm { border-left: 2px solid var(--bad); }
+.msg.edit-confirm .badge.bad { color: var(--bad); border-color: var(--bad); }
+.msg.edit-confirm .wc-diff {
+  margin: 6px 0 0; padding: 7px 8px; max-height: 220px; overflow: auto;
+  background: var(--inset); border: 1px solid var(--edge); border-radius: 4px;
+  font: 400 11px/1.45 var(--mono); color: var(--ink-dim); white-space: pre;
+}
+.msg.edit-confirm .wc-typed { margin-top: 7px; font: 400 11px var(--mono); color: var(--ink-dim); }
+.msg.edit-confirm .wc-typed label { display: block; }
+.msg.edit-confirm .wc-typed code { color: var(--brass); }
+.msg.edit-confirm .wc-actions button:disabled { opacity: .35; cursor: not-allowed; }
 #chatrow { display: flex; gap: 8px; margin-top: 10px; }
 #chatrow input {
   flex: 1; background: var(--inset); border: 1px solid var(--edge); color: var(--ink);
@@ -923,6 +934,15 @@ function handleOp(m) {
     case "write_resolved":
       resolveWriteCard(m.token, m.approved, m.outcome);
       break;
+    case "edit_confirm":
+      renderEditConfirm(m);
+      break;
+    case "edit_resolved":
+      resolveEditCard(m.token, m.approved, m.outcome);
+      break;
+    case "edit_undone":
+      markEditUndone(m.token, m.outcome);
+      break;
     case "trace": renderTrace(m.trace); break;
     case "tts_flush": flushSentence(m.index, m.ms); break;
     case "tts_done": finishTTS(); break;
@@ -1139,6 +1159,64 @@ function resolveWriteCard(token, approved, outcome) {
   const btns = card.querySelector(".wc-actions");
   if (btns) btns.innerHTML = approved ? '<span class="wc-done">Saved.</span>' : '<span class="wc-done">Cancelled.</span>';
   card.classList.add(outcome && outcome.error ? "failed" : "done");
+}
+
+/* ------- file edits: destructive, so the diff is shown and a phrase typed -- */
+function renderEditConfirm(pe) {
+  const chat = document.getElementById("chat"); if (!chat) return;
+  if (document.getElementById("erc_" + pe.token)) return;  // re-emitted each turn
+  const card = document.createElement("div");
+  card.className = "msg write-confirm edit-confirm"; card.id = "erc_" + pe.token;
+  card.innerHTML =
+    '<div class="who">File edit <span class="badge bad">destructive</span></div>' +
+    '<div class="body">' +
+      '<div class="wc-line">Nothing is written until you confirm. This edit is destructive.</div>' +
+      '<div class="wc-what"></div>' +
+      '<pre class="wc-diff"></pre>' +
+      '<div class="wc-typed">' +
+        '<label>To apply: type <code>yes, do it ' + (pe.token || "") + '</code> in the chat box, or tap Cancel.</label>' +
+      '</div>' +
+      '<div class="wc-actions">' +
+        '<button data-act="no">Cancel</button>' +
+      "</div>" +
+    "</div>";
+  // Paths and diffs come from the model: text, never innerHTML.
+  card.querySelector(".wc-what").textContent = pe.summary || pe.path || "";
+  card.querySelector(".wc-diff").textContent =
+    (pe.diff || "(no diff)") + (pe.diff_truncated ? "\n… diff truncated" : "");
+  card.querySelector('[data-act="no"]').onclick = () =>
+    wsSend("confirm_edit", { token: pe.token, approved: false });
+  chat.appendChild(card); chat.scrollTop = chat.scrollHeight;
+}
+function resolveEditCard(token, approved, outcome) {
+  const card = document.getElementById("erc_" + token); if (!card) return;
+  const typed = card.querySelector(".wc-typed");
+  if (typed) typed.remove();
+  const failed = outcome && outcome.error;
+  const btns = card.querySelector(".wc-actions");
+  if (btns) {
+    if (!failed && approved) {
+      btns.innerHTML = '<span class="wc-done">Applied.</span>' +
+        '<button data-act="undo">Undo</button>';
+      btns.querySelector('[data-act="undo"]').onclick = () =>
+        wsSend("undo_edit", { token: token });
+    } else {
+      // A wrong phrase leaves the token live, so say how to settle it again
+      // instead of implying the edit is gone.
+      const stillLive = failed && /requires_phrase|type/i.test(outcome.error || "") && approved;
+      btns.innerHTML = '<span class="wc-done">' +
+        (stillLive ? "Phrase did not match — still waiting." :
+         failed ? "Not applied." : "Cancelled.") + "</span>";
+    }
+  }
+  card.classList.add(failed && !/requires_phrase/i.test(outcome.error || "") ? "failed" : "done");
+}
+function markEditUndone(token, outcome) {
+  const btns = document.querySelector("#erc_" + token + " .wc-actions");
+  if (!btns) return;
+  btns.innerHTML = outcome && outcome.error
+    ? '<span class="wc-done">Undo failed.</span>'
+    : '<span class="wc-done">Reverted.</span>';
 }
 function addMsg(role, text, engine, isError) {
   const hint = document.getElementById("chathint");

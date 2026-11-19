@@ -78,6 +78,30 @@ def test_alert_acknowledge_is_loopback_only_and_idempotent():
         server.MODELS.ready = was_ready
 
 
+def test_durable_task_api_queues_reports_and_cancels_locally():
+    client, was_ready = _client()
+    try:
+        headers = {"x-jarvis-task-token": client.app.state.task_api_token}
+        with client:
+            forbidden = client.post("/api/tasks", json={"goal": "Do not enqueue"})
+            assert forbidden.status_code == 403
+            assert client.get("/api/tasks").status_code == 403
+            created = client.post("/api/tasks", json={"goal": "Summarize my project deadlines"}, headers=headers)
+            assert created.status_code == 202, created.text
+            task = created.json()["task"]
+            assert task["status"] == "queued"
+            fetched = client.get(f"/api/tasks/{task['id']}", headers=headers)
+            assert fetched.status_code == 200
+            assert fetched.json()["task"]["goal"] == "Summarize my project deadlines"
+            cancelled = client.post(f"/api/tasks/{task['id']}/cancel", headers=headers)
+            assert cancelled.status_code == 200
+            assert cancelled.json()["task"]["status"] == "cancelled"
+            assert client.post("/api/tasks", json={"goal": " "}, headers=headers).status_code == 400
+            assert client.post(f"/api/tasks/{task['id']}/retry", headers=headers).status_code == 409
+    finally:
+        server.MODELS.ready = was_ready
+
+
 def test_tiers_endpoint_is_honest_about_what_the_orb_enforces():
     client, was_ready = _client()
     try:

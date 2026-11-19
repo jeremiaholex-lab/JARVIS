@@ -131,6 +131,8 @@ def classify(action: PlannedAction) -> Tier:
         "read_file",
         "list_dir",
         "search_files",
+        "jarvis_task_status",
+        "jarvis_task_enqueue",
     }:
         return Tier.READ
 

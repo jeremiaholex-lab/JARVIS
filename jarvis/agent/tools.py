@@ -238,6 +238,38 @@ def _file_edit(action: str = "", path: str = "", old_string: str = "",
     return json.dumps(out, ensure_ascii=False)
 
 
+def _task_enqueue(goal: str, idempotency_key: str = "") -> str:
+    """Queue a bounded read-only background task for the orb task worker."""
+    from jarvis.agent.task_runner import configured_task_store
+
+    store = configured_task_store()
+    if store is None:
+        return json.dumps({"error": "durable task worker is not available in this host"})
+    task = store.create(goal, idempotency_key=idempotency_key)
+    return json.dumps({"task_id": task.id, "status": task.status,
+                       "goal": task.goal, "note": "Queued; the task runs with read-only tools."},
+                      ensure_ascii=False)
+
+
+def _task_status(task_id: str = "", limit: int = 10) -> str:
+    """Read durable background-task status without exposing local database internals."""
+    from jarvis.agent.task_runner import configured_task_store
+
+    store = configured_task_store()
+    if store is None:
+        return json.dumps({"error": "durable tasks are not available in this host"})
+    if task_id:
+        task = store.get(task_id)
+        if task is None:
+            return json.dumps({"error": "task not found"})
+        return json.dumps({"task": {"id": task.id, "goal": task.goal, "status": task.status,
+                                    "steps": task.steps, "result": task.result, "error": task.error},
+                           "events": store.events(task_id)}, ensure_ascii=False)
+    return json.dumps({"tasks": [{"id": t.id, "goal": t.goal, "status": t.status,
+                                   "steps": t.steps, "result": t.result, "error": t.error}
+                                  for t in store.list(limit=limit, include_terminal=False)]}, ensure_ascii=False)
+
+
 def _current_time() -> str:
     now = datetime.now().astimezone()
     return json.dumps({"iso": now.isoformat(timespec="seconds"), "weekday": now.strftime("%A")})
@@ -420,6 +452,28 @@ def build_tools() -> List[AgentTool]:
             "required": ["view"],
         },
     )
+    task_enqueue = _check_tier(
+        "jarvis_task_enqueue",
+        _task_enqueue,
+        "Queue a bounded background task for JARVIS to complete using read-only tools. Do this "
+        "only when the user explicitly asks to run something in the background or continue later. "
+        "The task cannot send messages, write files, or make external changes; those stay in the "
+        "existing confirmation flows.",
+        {"type": "object", "properties": {
+            "goal": {"type": "string", "description": "The user's requested task"},
+            "idempotency_key": {"type": "string", "description": "Optional request id to prevent duplicate queueing"},
+        }, "required": ["goal"]},
+    )
+    task_status = _check_tier(
+        "jarvis_task_status",
+        _task_status,
+        "Read status of queued JARVIS background tasks. Provide task_id for one task, or omit it "
+        "to list recent active tasks. This tool cannot create, retry, or cancel tasks.",
+        {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+            "limit": {"type": "integer", "description": "1-20, default 10"},
+        }},
+    )
     clock = _check_tier(
         "get_current_time",
         _current_time,
@@ -437,7 +491,7 @@ def build_tools() -> List[AgentTool]:
         {"type": "object", "properties": {"question": {"type": "string"}}},
     )
     tools.extend([t for t in (projects, rag, google, web, files_read, files_list,
-                               files_search, notion, clock, screen) if t is not None])
+                               files_search, notion, task_enqueue, task_status, clock, screen) if t is not None])
 
     # Stage 2: one WRITE-tier tool. It is advertised (so the model knows it can
     # act), but its fn is a side-effect-free proposer — running it only queues

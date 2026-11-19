@@ -207,59 +207,86 @@ def test_double_resolve_is_refused(editor, target):
     assert "error" in editor.resolve(r["token"], True, CONFIRM_PHRASE)
 
 
-# ------------------------------------------------- chat-box phrase (orb server)
+# -------------------------------------------------- confirmation grammar (hosts)
+#
+# These import the real grammar from file_edit rather than re-declaring a copy.
+# A local copy proves only that the copy matches; that was exactly how the two
+# hosts drifted apart (Telegram captured any token, the orb only fe_).
 
-def test_chat_box_phrase_regex_requires_all_three_words():
-    """The orb settles an edit from the chat box, so the phrase is parsed by a
-    regex before the model ever sees the text. A bare 'yes' must not match, or
-    a habitual reply would apply a destructive edit."""
-    import re
+def test_edit_confirm_grammar_requires_all_three_words():
+    from jarvis.security.file_edit import CONFIRM_PHRASE, EDIT_CONFIRM_RE
 
-    from jarvis.security.file_edit import CONFIRM_PHRASE
-
-    # Same shape as orb/server.py's _EDIT_CONFIRM_RE.
-    pattern = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
     token = "fe_abc123"
-
-    assert pattern.match(f"{CONFIRM_PHRASE} {token}")
-    assert pattern.match(f"yes do it {token}")
-    assert pattern.match(f"YES, DO IT {token}")
-    assert not pattern.match(f"yes {token}")
-    assert not pattern.match(f"do it {token}")
-    assert not pattern.match(f"yes, do it")
-    # The captured token is what gets resolved, not the prose.
-    assert pattern.match(f"{CONFIRM_PHRASE} {token}").group(2) == token
+    assert EDIT_CONFIRM_RE.match(f"{CONFIRM_PHRASE} {token}")
+    assert EDIT_CONFIRM_RE.match(f"yes do it {token}")
+    assert EDIT_CONFIRM_RE.match(f"YES, DO IT {token}")
+    assert not EDIT_CONFIRM_RE.match(f"yes {token}")
+    assert not EDIT_CONFIRM_RE.match("do it")
+    assert not EDIT_CONFIRM_RE.match("yes, do it")  # no token
+    assert EDIT_CONFIRM_RE.match(f"{CONFIRM_PHRASE} {token}").group(2) == token
 
 
-def test_chat_box_cancel_regex():
-    import re
+def test_edit_confirm_grammar_rejects_a_write_token():
+    """The token is constrained to fe_: a phrase aimed at a write token must
+    fall through to the misplaced-phrase hint, not the edit resolver."""
+    from jarvis.security.file_edit import (
+        CONFIRM_PHRASE,
+        EDIT_CONFIRM_RE,
+        EDIT_PHRASE_MISPLACED_RE,
+    )
 
-    pattern = re.compile(r"^(no|cancel)\s+(fe_\w+)$", re.IGNORECASE)
-    assert pattern.match("no fe_abc123").group(2) == "fe_abc123"
-    assert pattern.match("cancel fe_abc123")
-    assert not pattern.match("no")
+    write_token = "pw_ab12"
+    assert not EDIT_CONFIRM_RE.match(f"{CONFIRM_PHRASE} {write_token}")
+    m = EDIT_PHRASE_MISPLACED_RE.match(f"{CONFIRM_PHRASE} {write_token}")
+    assert m and m.group(2) == write_token
 
 
-def test_chat_box_bare_yes_is_intercepted_not_sent_to_the_model():
+def test_edit_cancel_grammar():
+    from jarvis.security.file_edit import EDIT_CANCEL_RE
+
+    assert EDIT_CANCEL_RE.match("no fe_abc123").group(2) == "fe_abc123"
+    assert EDIT_CANCEL_RE.match("cancel fe_abc123")
+    assert not EDIT_CANCEL_RE.match("no")
+
+
+def test_write_grammar_accepts_yes_no_and_cancel():
+    from jarvis.security.file_edit import WRITE_CONFIRM_RE
+
+    for word in ("yes", "no", "cancel"):
+        assert WRITE_CONFIRM_RE.match(f"{word} pw_ab12").group(2) == "pw_ab12"
+    assert not WRITE_CONFIRM_RE.match("yes")
+
+
+def test_bare_yes_never_confirms_an_edit():
     """'yes fe_x' must not reach the model: it cannot apply anything, but it
-    would say it did. It is answered with the phrase hint instead, matching the
-    Telegram host, and must never match the confirm pattern."""
-    import re
+    would say it did. It is answered with the phrase hint instead, and must
+    never match the confirm pattern."""
+    from jarvis.security.file_edit import (
+        CONFIRM_PHRASE,
+        EDIT_BARE_YES_RE,
+        EDIT_CONFIRM_RE,
+    )
 
-    from jarvis.security.file_edit import CONFIRM_PHRASE
-
-    bare = re.compile(r"^yes\s+(fe_\w+)$", re.IGNORECASE)
-    confirm = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
     token = "fe_abc123"
-
-    m = bare.match(f"yes {token}")
+    m = EDIT_BARE_YES_RE.match(f"yes {token}")
     assert m and m.group(1) == token
-    assert not confirm.match(f"yes {token}"), "a bare yes must never confirm"
-    # The hint it is answered with names the real phrase.
+    assert not EDIT_CONFIRM_RE.match(f"yes {token}"), "a bare yes must never confirm"
     hint = (f"{m.group(1)} is a destructive file edit, so 'yes' alone will not "
             f"apply it. Type '{CONFIRM_PHRASE} {m.group(1)}' to confirm it, "
             f"or 'no {m.group(1)}' to cancel.")
     assert CONFIRM_PHRASE in hint and token in hint
+
+
+def test_both_hosts_share_the_one_grammar():
+    """Defining the grammar in file_edit is the whole point: both hosts import
+    the same objects, so they cannot disagree about a confirmation."""
+    from jarvis.security import file_edit
+    import jarvis.channels.telegram as tg
+    import orb.server as orb
+
+    assert tg._EDIT_CONFIRM_RE is file_edit.EDIT_CONFIRM_RE
+    assert tg._CONFIRM_RE is file_edit.WRITE_CONFIRM_RE
+    assert orb._EDIT_CONFIRM_RE is file_edit.EDIT_CONFIRM_RE
 
 
 def test_wrong_phrase_from_chat_box_leaves_the_token_settleable(editor, target):

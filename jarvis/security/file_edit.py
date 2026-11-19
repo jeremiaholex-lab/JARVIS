@@ -41,6 +41,22 @@ from .tiers import PlannedAction, Tier, is_sensitive
 
 EDIT_TOOL = "jarvis_file_edit"
 CONFIRM_PHRASE = "yes, do it"
+
+# The one confirmation grammar. Both hosts (orb, Telegram) import these so the
+# regexes cannot drift apart — the drift was a real bug: Telegram captured any
+# token where the orb captured only fe_, so a phrase aimed at a write token was
+# routed to the edit resolver. Keep them here, beside the phrase they enforce.
+_PHRASE_RE_SRC = r"yes,?\s+do\s+it"
+EDIT_CONFIRM_RE = re.compile(rf"^({_PHRASE_RE_SRC})\s+(fe_\w+)$", re.IGNORECASE)
+EDIT_CANCEL_RE = re.compile(r"^(no|cancel)\s+(fe_\w+)$", re.IGNORECASE)
+# "yes fe_x": not enough to apply a destructive edit, but must be answered
+# offline — a model would claim it had applied the file.
+EDIT_BARE_YES_RE = re.compile(r"^yes\s+(fe_\w+)$", re.IGNORECASE)
+# "yes, do it pw_x": the phrase is for edits, the token is not an edit token.
+EDIT_PHRASE_MISPLACED_RE = re.compile(rf"^({_PHRASE_RE_SRC})\s+(\S+)$", re.IGNORECASE)
+# Write tokens (one-tap): "yes pw_x" / "no pw_x" / "cancel pw_x".
+WRITE_CONFIRM_RE = re.compile(r"^(yes|no|cancel)\s+(\S+)$", re.IGNORECASE)
+
 _VALID_ACTIONS = ("replace", "rewrite", "create")
 
 _MAX_EDIT_BYTES = 200_000
@@ -416,4 +432,8 @@ def _reason(verdict: Verdict) -> str:
     return verdict.reason
 
 
-__all__ = ["SecuredFileEdits", "PendingEdit", "EDIT_TOOL", "CONFIRM_PHRASE", "_VALID_ACTIONS"]
+__all__ = [
+    "SecuredFileEdits", "PendingEdit", "EDIT_TOOL", "CONFIRM_PHRASE",
+    "EDIT_CONFIRM_RE", "EDIT_CANCEL_RE", "EDIT_BARE_YES_RE",
+    "EDIT_PHRASE_MISPLACED_RE", "WRITE_CONFIRM_RE", "_VALID_ACTIONS",
+]

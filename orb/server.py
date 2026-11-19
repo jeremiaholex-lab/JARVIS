@@ -77,7 +77,14 @@ SAMPLE_RATE = 16000
 # Sentence-shaping lives in jarvis.speech so the morning briefing (which has no
 # web server in front of it) speaks with the same rules the orb does.
 from jarvis.speech import split_sentences as _split_sentences, speech_text as _speech_text
-from jarvis.security.file_edit import CONFIRM_PHRASE
+# The confirmation grammar is defined once, in file_edit, so the orb and the
+# Telegram host cannot drift. See EDIT_CONFIRM_RE there.
+from jarvis.security.file_edit import (
+    CONFIRM_PHRASE,
+    EDIT_BARE_YES_RE,
+    EDIT_CANCEL_RE,
+    EDIT_CONFIRM_RE,
+)
 OWW_FRAME = 1280          # 80 ms
 MAX_UTTERANCE_S = 30
 TAIL_S = 1.2              # silence needed to close a VAD segment (relaxed from 0.6 for accented and deliberate speech)
@@ -85,14 +92,13 @@ VAD_POLL_S = 0.8
 WAKE_MODEL = "hey jarvis"
 
 # Typed confirmation for a destructive file edit, sent from the chat box:
-# "yes, do it fe_ab12". Parsed offline so a phrase never reaches the model —
-# the model must not be able to answer its own confirmation prompt.
-# "yes fe_ab12" cannot apply a destructive edit; answer it here rather than
-# handing it to the model, which would confidently say it applied a file it
-# never touched. Mirrors the Telegram host.
-_EDIT_BARE_YES_RE = re.compile(r"^yes\s+(fe_\w+)$", re.IGNORECASE)
-_EDIT_CONFIRM_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
-_EDIT_CANCEL_RE = re.compile(r"^(no|cancel)\s+(fe_\w+)$", re.IGNORECASE)
+# "yes, do it fe_ab12". The grammar (_EDIT_CONFIRM_RE etc.) lives in
+# jarvis.security.file_edit and is imported above, shared with the Telegram
+# host. Parsed offline so a phrase never reaches the model — the model must not
+# be able to answer its own confirmation prompt.
+_EDIT_CONFIRM_RE = EDIT_CONFIRM_RE
+_EDIT_CANCEL_RE = EDIT_CANCEL_RE
+_EDIT_BARE_YES_RE = EDIT_BARE_YES_RE
 
 SYSTEM_PROMPT = (
     "Your assistant name and identity is JARVIS, a personal voice assistant shown as a floating holo-orb. "

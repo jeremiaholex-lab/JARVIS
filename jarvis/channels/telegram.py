@@ -44,15 +44,27 @@ _API = "https://api.telegram.org"
 _MAX_LEN = 4096
 _HISTORY_TURNS = 5  # user+assistant pairs kept per chat
 
-# "yes pw_abc123..." / "no pw_abc123..." / "cancel pw_abc123" — settle a write.
-_CONFIRM_RE = re.compile(r"^(yes|no|cancel)\s+(\S+)$", re.IGNORECASE)
+# Confirmation grammar is defined once in jarvis.security.file_edit so this host
+# and the orb cannot drift (they did: Telegram captured any token where the orb
+# captured only fe_, so "yes, do it pw_x" was routed to the edit resolver).
+from jarvis.security.file_edit import (
+    CONFIRM_PHRASE,
+    EDIT_BARE_YES_RE,
+    EDIT_CANCEL_RE,
+    EDIT_CONFIRM_RE,
+    EDIT_PHRASE_MISPLACED_RE,
+    WRITE_CONFIRM_RE,
+)
+
+# "yes pw_abc123" / "no pw_abc123" / "cancel pw_abc123" — settle a write.
+_CONFIRM_RE = WRITE_CONFIRM_RE
 # "yes, do it fe_abc..." — a file edit is destructive and needs the phrase.
-# The token is constrained to fe_ so a phrase aimed at a write token cannot be
-# mistaken for an edit confirmation (it would die on an unknown edit token).
-_EDIT_CONFIRM_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
+_EDIT_CONFIRM_RE = EDIT_CONFIRM_RE
 # A phrase aimed at anything else: answer offline rather than let the model
 # claim it applied something.
-_EDIT_PHRASE_MISPLACED_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(\S+)$", re.IGNORECASE)
+_EDIT_PHRASE_MISPLACED_RE = EDIT_PHRASE_MISPLACED_RE
+_EDIT_BARE_YES_RE = EDIT_BARE_YES_RE
+_EDIT_CANCEL_RE = EDIT_CANCEL_RE
 _EDIT_PHRASE_HINT = (
     "{token} is a destructive file edit, so 'yes' alone will not apply it. "
     "Reply 'yes, do it {token}' to confirm it, or 'no {token}' to cancel."

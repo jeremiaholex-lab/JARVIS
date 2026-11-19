@@ -1,0 +1,20 @@
+{
+  "local_model": "qwen3:1.7b",
+  "cloud": {
+    "base_url": "https://apihub.agnes-ai.com/v1",
+    "model": "agnes-3.0-flash"
+  },
+  "tiers": {
+    "read": "free",
+    "write": "confirm",
+    "destructive": "hard_gate"
+  },
+  "voice": "af_heart",
+  "wake_threshold": 0.4,
+  "vad_tail_s": 1.2,
+  "stt_beam_size": 5,
+  "local_num_ctx": 4096,
+  "vision": {
+    "cloud_consent": true
+  }
+}

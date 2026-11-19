@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JARVIS Orb — 3D Holo-Flux</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0e14; color: #cdd6e4; font-family: "Segoe UI", system-ui, sans-serif; padding: 26px; }
+h1 { font-weight: 300; letter-spacing: 5px; text-transform: uppercase; color: #e8eef7; font-size: 21px; }
+.sub { color: #6b7a90; font-size: 13px; margin: 8px 0 18px; max-width: 700px; line-height: 1.5; }
+.demo {
+  background: linear-gradient(90deg, #1d4f8f, #2b6cb0);
+  color: #fff; border: none; border-radius: 24px; padding: 10px 22px;
+  font-size: 13px; letter-spacing: 1px; cursor: pointer; margin-bottom: 18px;
+}
+.demo:hover { filter: brightness(1.15); }
+.stage { display: flex; gap: 26px; flex-wrap: wrap; }
+.canvas-card {
+  background: #101722; border: 1px solid #1d2836; border-radius: 14px;
+  padding: 18px; align-self: flex-start;
+}
+canvas { display: block; cursor: grab; touch-action: none; }
+canvas:active { cursor: grabbing; }
+.ctrl {
+  background: #101722; border: 1px solid #1d2836; border-radius: 14px;
+  padding: 18px; align-self: flex-start; width: 280px;
+}
+.ctrl h3 { font-size: 13px; font-weight: 600; color: #e8eef7; margin-bottom: 10px; letter-spacing: .5px; }
+.states { display: flex; flex-wrap: wrap; gap: 6px; }
+.states button {
+  background: #16202f; color: #9fb0c8; border: 1px solid #24334a;
+  padding: 6px 12px; border-radius: 20px; font-size: 12px; cursor: pointer;
+  letter-spacing: .5px;
+}
+.states button.active { background: #2b6cb0; border-color: #3f83d8; color: #fff; }
+.note { font-size: 12px; color: #7c8ba1; line-height: 1.5; margin-top: 14px; }
+.note b { color: #b9c6d8; }
+</style>
+</head>
+<body>
+<h1>Holo-Flux — 3D</h1>
+<p class="sub">Now a true 3D object: perspective projection, depth-sorted particle shell, hex frames spinning in
+3D space. <b>Drag the orb to orbit it</b>, scroll to zoom. States still drive the same pipeline —
+listening pulls the shell in with ripples, thinking swirls it faster in amber, speaking makes the whole
+swarm shimmer with voice energy, muted dies to grey. All vanilla JS + 2D canvas: no libraries, runs on a laptop CPU.</p>
+
+<button class="demo" id="demoBtn">&#9654;&nbsp; Run conversation demo</button>
+
+<div class="stage">
+  <div class="canvas-card">
+    <canvas id="cv" width="440" height="460"></canvas>
+  </div>
+  <div class="ctrl">
+    <h3>Agent state</h3>
+    <div class="states" id="states">
+      <button data-state="idle" class="active">Idle</button>
+      <button data-state="listening">Listening</button>
+      <button data-state="thinking">Thinking</button>
+      <button data-state="speaking">Speaking</button>
+      <button data-state="muted">Muted</button>
+    </div>
+    <p class="note">
+      <b>Drag</b> to orbit &middot; <b>scroll</b> to zoom &middot; the orb auto-rotates when you let go.
+      In the real agent: listening = your mic energy, speaking = Kokoro's output energy, thinking = slow
+      internal pulse (no audio). The particle shell is 900 points — trivial for a CPU.
+    </p>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ---------- simulated voice energy (replaced by real FFT in the agent) ---------- */
+function fft(i, t, speed) {
+  var a = 0.5 + 0.5 * Math.sin(t * 0.011 * speed + i * 0.9);
+  var b = 0.5 + 0.5 * Math.sin(t * 0.041 * speed + i * 2.3 + 1.7);
+  var c = 0.5 + 0.5 * Math.sin(t * 0.071 * speed + i * 0.61 + 4.2);
+  return Math.pow(a * 0.5 + b * 0.3 + c * 0.2, 1.4) * 0.95;
+}
+
+/* ---------- state ---------- */
+var S = { state: "idle", st: 0 };
+
+document.querySelectorAll("#states button").forEach(function (b) {
+  b.addEventListener("click", function () { stopDemo(); setState(b.dataset.state); });
+});
+function setState(s) {
+  S.state = s; S.st = 0;
+  document.querySelectorAll("#states button").forEach(function (b) {
+    b.classList.toggle("active", b.dataset.state === s);
+  });
+}
+
+/* ---------- scene ---------- */
+var cv = document.getElementById("cv");
+var ctx = cv.getContext("2d");
+var W = 440, H = 460, CX = W / 2, CY = 212, R = 92;
+
+var N = 900, pts = [];
+var golden = Math.PI * (3 - Math.sqrt(5));
+for (var i = 0; i < N; i++) {
+  var y = 1 - (i / (N - 1)) * 2;
+  var rad = Math.sqrt(1 - y * y);
+  var th = golden * i;
+  pts.push({
+    x: Math.cos(th) * rad, y: y, z: Math.sin(th) * rad,
+    sz: 0.9 + Math.random() * 1.9,
+    ph: Math.random() * Math.PI * 2,
+    sp: 0.6 + Math.random() * 0.8
+  });
+}
+var zbuf = new Float32Array(N);   // per-frame z for depth sort
+var order = Array.from({ length: N }, function (_, i) { return i; });
+
+/* orbit camera */
+var yaw = 0.7, pitch = 0.32, vyaw = 0, vpitch = 0;
+var zoom = 1.0;                  // f = 2.4 * zoom
+var dragging = false, lastX = 0, lastY = 0;
+
+cv.addEventListener("pointerdown", function (e) {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  vyaw = 0; vpitch = 0;
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", function (e) {
+  if (!dragging) return;
+  var dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  yaw += dx * 0.006; pitch += dy * 0.006;
+  pitch = Math.max(-1.25, Math.min(1.25, pitch));
+  vyaw = dx * 0.006; vpitch = dy * 0.006;
+});
+cv.addEventListener("pointerup", function () { dragging = false; });
+cv.addEventListener("wheel", function (e) {
+  e.preventDefault();
+  zoom = Math.max(0.7, Math.min(1.6, zoom - e.deltaY * 0.001));
+}, { passive: false });
+
+function palette() {
+  switch (S.state) {
+    case "listening": return { rgb: "90,230,255",  auto: 0.25, spin: 0.15, label: "LISTENING",  bright: 1.0 };
+    case "thinking":  return { rgb: "255,200,90",  auto: 1.4,  spin: 0.9,  label: "PROCESSING", bright: 1.0 };
+    case "speaking":  return { rgb: "90,235,255",  auto: 0.4,  spin: 0.2,  label: "SPEAKING",   bright: 1.0 };
+    case "muted":     return { rgb: "110,120,135", auto: 0,    spin: 0,    label: "OFFLINE",    bright: 0.35 };
+    default:          return { rgb: "90,150,255",  auto: 0.12, spin: 0.06, label: "STANDBY",     bright: 1.0 };
+  }
+}
+
+/* project a model-space point (unit-sphere coords * scale) to screen */
+var P = { x: 0, y: 0, d: 0, s: 1 };
+function project(mx, my, mz) {
+  var cY = Math.cos(yaw), sY = Math.sin(yaw);
+  var cP = Math.cos(pitch), sP = Math.sin(pitch);
+  var x1 = mx * cY + mz * sY;
+  var z1 = -mx * sY + mz * cY;
+  var y2 = my * cP - z1 * sP;
+  var z2 = my * sP + z1 * cP;
+  var f = 2.4 * zoom;
+  var persp = f / (f + z2);
+  P.x = CX + x1 * R * persp;
+  P.y = CY + y2 * R * persp;
+  P.d = (z2 + 1.6) / 3.2;          // 0 far .. 1 near-ish
+  P.s = persp;
+  return P;
+}
+
+function hex3D(scale, rotZ, offsetZ, stroke, lw) {
+  var cZ = Math.cos(rotZ), sZ = Math.sin(rotZ);
+  var prev = null;
+  ctx.strokeStyle = stroke; ctx.lineWidth = lw || 1;
+  ctx.beginPath();
+  for (var i = 0; i <= 6; i++) {
+    var a = (i / 6) * Math.PI * 2;
+    var lx = Math.cos(a) * scale * cZ - Math.sin(a) * scale * sZ;
+    var ly = Math.cos(a) * scale * sZ + Math.sin(a) * scale * cZ;
+    var q = project(lx, ly, (offsetZ || 0));
+    if (i === 0) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
+    prev = q;
+  }
+  ctx.stroke();
+}
+
+/* ---------- main loop ---------- */
+var lastT = performance.now();
+
+function frame(now) {
+  var dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  S.st += dt;
+
+  var Pp = palette();
+  var env = Math.min(1, S.st / 0.8);
+
+  // auto rotation + inertia
+  if (!dragging) {
+    yaw += Pp.auto * dt + vyaw;
+    pitch += Pp.spin * 0.4 * dt * (S.state === "thinking" ? -1 : 1) + vpitch;
+    pitch = Math.max(-1.25, Math.min(1.25, pitch));
+    vyaw *= Math.pow(0.05, dt);       // exponential decay
+    vpitch *= Math.pow(0.05, dt);
+  }
+
+  ctx.clearRect(0, 0, W, H);
+
+  var pull = S.state === "listening" ? 0.74 : 1;
+  var breathe = 1 + 0.035 * Math.sin(now * 0.0011 * (S.state === "thinking" ? 3 : 1));
+
+  // --- holo hex frames in 3D (behind the shell) ---
+  var spin = now * 0.00022 * (S.state === "thinking" ? 4 : 1);
+  hex3D(1.9, spin, 0, "rgba(" + Pp.rgb + "," + (0.20 * Pp.bright) + ")");
+  hex3D(1.72, -spin * 1.6, 0, "rgba(" + Pp.rgb + "," + (0.12 * Pp.bright) + ")");
+
+  // corner ticks (2D)
+  ctx.strokeStyle = "rgba(" + Pp.rgb + ",0.4)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(CX - 196, CY - 188); ctx.lineTo(CX - 186, CY - 188); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX + 186, CY + 188); ctx.lineTo(CX + 196, CY + 188); ctx.stroke();
+
+  // --- compute all particle positions, depth-sort back-to-front ---
+  for (var i = 0; i < N; i++) {
+    var p = pts[i];
+    var v = S.state === "speaking" ? fft(i % 56, now, p.sp) * env
+          : S.state === "thinking" ? 0.10 + 0.10 * Math.sin(now * 0.004 + p.ph)
+          : 0.05 * (0.5 + 0.5 * Math.sin(now * 0.0012 + p.ph));
+    var rr = pull * breathe * (1 + 0.24 * v + 0.03 * Math.sin(now * 0.003 + p.ph));
+    var q = project(p.x * rr, p.y * rr, p.z * rr);
+    pts[i]._x = q.x; pts[i]._y = q.y;
+    pts[i]._v = v; pts[i]._s = q.s;
+    zbuf[i] = q.d;
+  }
+  order.sort(function (a, b) { return zbuf[a] - zbuf[b]; });
+
+  var dim = Pp.bright;
+  for (var k = 0; k < N; k++) {
+    var j = order[k];
+    var pp = pts[j];
+    var depth = zbuf[j];
+    var alpha = (0.08 + 0.74 * Math.pow(depth, 1.15)) * dim;
+    var size = pp.sz * (0.55 + depth * 0.95) * pp._s * (1 + 1.1 * pp._v) * (S.state === "muted" ? 0.8 : 1);
+    ctx.fillStyle = "rgba(" + Pp.rgb + "," + alpha.toFixed(3) + ")";
+    ctx.beginPath();
+    ctx.arc(pp._x, pp._y, size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // volumetric core glow (front-biased)
+  var g = ctx.createRadialGradient(CX - R * 0.15, CY - R * 0.18, 0, CX, CY, R * pull * 0.9);
+  g.addColorStop(0, "rgba(" + Pp.rgb + "," + (0.16 * dim * (1 + 0.5 * (S.state === "speaking" ? fft(7, now, 1.5) * env : 0))) + ")");
+  g.addColorStop(1, "rgba(" + Pp.rgb + ",0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(CX, CY, R * pull * 0.9, 0, Math.PI * 2); ctx.fill();
+
+  // scanlines clipped to the sphere silhouette
+  ctx.save();
+  ctx.beginPath(); ctx.arc(CX, CY, R * pull * 1.05, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = "rgba(5,8,14,0.34)";
+  var off = S.state === "speaking" ? (now * 0.05 % 4) : (now * 0.012 % 4);
+  for (var sy = CY - R - 12 + off; sy < CY + R + 12; sy += 4) {
+    ctx.fillRect(CX - R - 12, sy, (R + 12) * 2, 1.2);
+  }
+  ctx.restore();
+
+  // RGB fringe
+  ctx.globalAlpha = 0.16 * dim;
+  var gR = ctx.createRadialGradient(CX - 5, CY - 4, 2, CX, CY, R * pull);
+  gR.addColorStop(0, "rgba(255,90,90,.7)"); gR.addColorStop(1, "rgba(255,90,90,0)");
+  ctx.fillStyle = gR; ctx.beginPath(); ctx.arc(CX - 3, CY, R * pull * 0.9, 0, Math.PI * 2); ctx.fill();
+  var gC = ctx.createRadialGradient(CX + 5, CY - 4, 2, CX, CY, R * pull);
+  gC.addColorStop(0, "rgba(90,255,255,.7)"); gC.addColorStop(1, "rgba(90,255,255,0)");
+  ctx.fillStyle = gC; ctx.beginPath(); ctx.arc(CX + 3, CY, R * pull * 0.9, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // listening ripples (expanding rings, slight 3D squash by pitch)
+  if (S.state === "listening") {
+    var squash = Math.abs(Math.cos(pitch));
+    var lr = ((S.st * 0.5) % 1) * 40 + R * pull + 10;
+    ctx.globalAlpha = Math.max(0, 1 - (lr - R - 10) / 44) * 0.8;
+    ctx.strokeStyle = "rgb(" + Pp.rgb + ")"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(CX, CY, lr, lr * squash, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // status label
+  ctx.fillStyle = "rgba(" + Pp.rgb + ",0.9)";
+  ctx.font = "11px 'Segoe UI'";
+  ctx.textAlign = "center";
+  ctx.fillText(Pp.label, CX, CY - R * 1.9 - 18);
+
+  // speaking spectrum strip
+  if (S.state === "speaking") {
+    var n = 26, w = 10;
+    for (var s2 = 0; s2 < n; s2++) {
+      var v2 = fft(s2, now, 1.8) * env;
+      ctx.fillStyle = "rgba(110,235,255," + (0.2 + 0.55 * v2) + ")";
+      ctx.fillRect(CX - (n * w) / 2 + s2 * w + 1, CY + R + 26 - v2 * 36, w - 2, v2 * 36 + 2);
+    }
+  }
+
+  // idle baseline
+  if (S.state === "idle") {
+    ctx.strokeStyle = "rgba(" + Pp.rgb + ",0.3)";
+    ctx.beginPath(); ctx.moveTo(CX - 64, CY + R + 34); ctx.lineTo(CX + 64, CY + R + 34); ctx.stroke();
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- conversation demo ---------- */
+var demoTimers = [];
+function stopDemo() {
+  demoTimers.forEach(clearTimeout); demoTimers = [];
+  document.getElementById("demoBtn").innerHTML = "&#9654;&nbsp; Run conversation demo";
+}
+var SCRIPT = [
+  ["listening", 1800],
+  ["thinking", 1800],
+  ["speaking", 3200]
+];
+document.getElementById("demoBtn").addEventListener("click", function () {
+  stopDemo();
+  setState("idle");
+  var t = 0;
+  SCRIPT.forEach(function (pair) {
+    demoTimers.push(setTimeout(function () { setState(pair[0]); }, t));
+    t += pair[1];
+  });
+  demoTimers.push(setTimeout(function () {
+    setState("idle");
+    document.getElementById("demoBtn").innerHTML = "&#9654;&nbsp; Run conversation demo";
+    demoTimers = [];
+  }, t));
+});
+</script>
+</body>
+</html>

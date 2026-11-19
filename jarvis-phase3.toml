@@ -1,0 +1,39 @@
+[engine]
+default = "ollama"
+
+[intelligence]
+default_model = "qwen3:8b"
+
+[agent]
+default_agent = "native_openhands"
+max_turns = 8
+
+[tools]
+enabled = ["file_read", "file_write", "jarvis_file_undo", "shell_exec", "code_interpreter", "think", "jarvis_projects_read", "jarvis_projects_write"]
+
+[security]
+allowed_dirs = ["C:/Users/HP/Desktop/JARVIS"]
+enforce_tool_confirmation = true
+
+[speech]
+tts_backend = "kokoro"
+voice_id = "af_heart"
+voice_speed = 1.0
+
+[digest]
+enabled = true
+schedule = "0 8 * * *"
+timezone = "America/Toronto"
+persona = "jarvis"
+honorific = ""
+tts_backend = "kokoro"
+voice_id = "af_heart"
+sections = ["messages", "calendar"]
+
+[digest.messages]
+sources = ["gmail", "google_tasks"]
+max_items = 8
+
+[digest.calendar]
+sources = ["gcalendar"]
+max_items = 12

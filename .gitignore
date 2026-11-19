@@ -1,0 +1,34 @@
+# secrets
+.env
+google-oauth-client.json
+.google-token.json
+.microsoft-token.bin
+.openjarvis/
+jarvis_projects.db
+
+# local model weights
+models/
+*.gguf
+
+# build artifacts / caches
+node_modules/
+target/
+__pycache__/
+.venv/
+
+# C# orb build output + WebView2 runtime data
+orb/bin/
+orb/obj/
+
+# tool caches and local machine config
+.pytest_cache/
+.playwright-mcp/
+.vscode/
+.kombai/
+.impeccable/
+.claude/
+
+# shell logs and test audio artifacts
+orb_shell.err
+orb_shell.out
+kokoro_test.wav

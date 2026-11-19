@@ -44,10 +44,15 @@ _API = "https://api.telegram.org"
 _MAX_LEN = 4096
 _HISTORY_TURNS = 5  # user+assistant pairs kept per chat
 
-# "yes pw_abc123..." / "no pw_abc123..." — the two words that settle a write.
-_CONFIRM_RE = re.compile(r"^(yes|no)\s+(\S+)$", re.IGNORECASE)
+# "yes pw_abc123..." / "no pw_abc123..." / "cancel pw_abc123" — settle a write.
+_CONFIRM_RE = re.compile(r"^(yes|no|cancel)\s+(\S+)$", re.IGNORECASE)
 # "yes, do it fe_abc..." — a file edit is destructive and needs the phrase.
-_EDIT_CONFIRM_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(\S+)$", re.IGNORECASE)
+# The token is constrained to fe_ so a phrase aimed at a write token cannot be
+# mistaken for an edit confirmation (it would die on an unknown edit token).
+_EDIT_CONFIRM_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(fe_\w+)$", re.IGNORECASE)
+# A phrase aimed at anything else: answer offline rather than let the model
+# claim it applied something.
+_EDIT_PHRASE_MISPLACED_RE = re.compile(r"^(yes,?\s+do\s+it)\s+(\S+)$", re.IGNORECASE)
 _EDIT_PHRASE_HINT = (
     "{token} is a destructive file edit, so 'yes' alone will not apply it. "
     "Reply 'yes, do it {token}' to confirm it, or 'no {token}' to cancel."
@@ -174,6 +179,13 @@ class TelegramBot:
         confirm = _EDIT_CONFIRM_RE.match(text)
         if confirm:
             return self._resolve_edit_reply(chat_id, True, confirm.group(2), confirm.group(1))
+        misplaced = _EDIT_PHRASE_MISPLACED_RE.match(text)
+        if misplaced:
+            # "yes, do it pw_x" — the phrase is for edits, the token is not an
+            # edit. Answer here; a turn would let the model claim it applied.
+            self.send(chat_id, f"{misplaced.group(2)} is not a file edit token. "
+                               "Edits are confirmed with 'yes, do it fe_…'.")
+            return None
         confirm = _CONFIRM_RE.match(text)
         if confirm:
             approved = confirm.group(1).lower() == "yes"

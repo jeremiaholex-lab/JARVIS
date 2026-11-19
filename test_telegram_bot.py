@@ -272,3 +272,29 @@ def test_write_token_still_resolves_through_the_write_path(tmp_path):
     bot.handle_message("c", "yes pw_ab12")
     assert bot.brain.resolves == [("pw_ab12", True)]
     assert bot.brain.edit_resolves == []
+
+
+def test_phrase_aimed_at_a_write_token_never_reaches_the_edit_resolver(tmp_path):
+    # "yes, do it pw_x" must not die on an unknown edit token, and must not
+    # reach the model either — it would claim it applied something.
+    bot = make_bot(tmp_path)
+    bot.handle_message("c", "yes, do it pw_ab12")
+    assert bot.brain.edit_resolves == []
+    assert bot.brain.resolves == []
+    assert bot.brain.calls == []
+    assert "not a file edit token" in _sent_texts(bot)[0]
+
+
+def test_cancel_word_cancels_an_edit(tmp_path):
+    bot = make_bot(tmp_path, pending_edits=[PENDING_EDIT])
+    bot.handle_message("c", "cancel fe_cd34")
+    assert bot.brain.edit_resolves == [("fe_cd34", False, "")]
+    assert bot.brain.calls == []
+
+
+def test_cancel_word_cancels_a_write(tmp_path):
+    bot = make_bot(tmp_path)
+    bot.handle_message("c", "cancel pw_ab12")
+    assert bot.brain.resolves == [("pw_ab12", False)]
+    assert bot.brain.edit_resolves == []
+    assert bot.brain.calls == []

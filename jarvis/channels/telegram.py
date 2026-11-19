@@ -1,0 +1,219 @@
+"""JARVIS on Telegram: one private bot, the full agent brain, zero new deps.
+
+Long-polls the raw Bot API with ``requests`` (python-telegram-bot is not a
+project dependency, and the runtime's own Telegram adapter falls back to
+send-only when it is missing). Inbound text goes through the same
+:class:`~jarvis.agent.brain.Brain` the orb runs — routing, read-tier tools
+(web search, Notion, Google, projects), escalation — so a chat message gets
+the same answers a voice question would.
+
+Setup (owner, one time):
+  1. Talk to @BotFather on Telegram, /newbot, copy the token.
+  2. Add TELEGRAM_BOT_TOKEN=123456:ABC... to .env
+  3. Optionally JARVIS_TELEGRAM_ALLOWED_CHATS=your_chat_id to keep it private.
+  4. Run:  python connect_telegram.py
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import queue
+import threading
+import time
+from pathlib import Path
+from typing import Dict, List, Optional
+
+_logger = logging.getLogger(__name__)
+
+JARVIS = Path(__file__).resolve().parents[2]
+_API = "https://api.telegram.org"
+_MAX_LEN = 4096
+_HISTORY_TURNS = 5  # user+assistant pairs kept per chat
+
+_HELP = (
+    "I'm JARVIS. Send me a question and I answer with my usual tools "
+    "(projects, your documents, Google, Notion, web search).\n"
+    "Commands: /reset clears this chat's memory with me; /cloud <question> "
+    "forces the stronger cloud model for one answer."
+)
+
+
+def _seed_env() -> None:
+    """Mirror orb/server.py: pull bot config keys from .env into os.environ."""
+    if not (JARVIS / ".env").exists():
+        return
+    for line in (JARVIS / ".env").read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k in ("TELEGRAM_BOT_TOKEN", "JARVIS_TELEGRAM_ALLOWED_CHATS"):
+                os.environ.setdefault(k, v)
+
+
+class TelegramBot:
+    """One Bot API session: poll loop + an ordered worker that runs the brain.
+
+    Messages are processed strictly in receive order (one worker, a queue),
+    so two quick questions never race the local engine or the history file.
+    """
+
+    def __init__(
+        self,
+        token: str = "",
+        brain=None,
+        history_path: Optional[Path] = None,
+        allowed_chat_ids: str = "",
+    ):
+        _seed_env()
+        self.token = (token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+        if not self.token:
+            raise RuntimeError(
+                "no Telegram bot token. Add TELEGRAM_BOT_TOKEN to .env "
+                "(create one with @BotFather, /newbot)."
+            )
+        self.allowed = {c.strip() for c in allowed_chat_ids or os.environ.get("JARVIS_TELEGRAM_ALLOWED_CHATS", "").split(",") if c.strip()}
+        self.brain = brain
+        self.history_path = Path(history_path or JARVIS / ".telegram-history.json")
+        self._history: Dict[str, List[dict]] = self._load_history()
+        self._offset = 0
+
+    # -- history --------------------------------------------------------------
+
+    def _load_history(self) -> Dict[str, List[dict]]:
+        try:
+            data = json.loads(self.history_path.read_text(encoding="utf-8"))
+            return {k: v for k, v in data.items() if isinstance(v, list)}
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            _logger.warning("telegram history unreadable, starting fresh")
+            return {}
+
+    def _save_history(self) -> None:
+        try:
+            self.history_path.write_text(json.dumps(self._history), encoding="utf-8")
+        except Exception:
+            _logger.warning("could not persist telegram history", exc_info=True)
+
+    # -- Bot API --------------------------------------------------------------
+
+    def api(self, method: str, **params) -> dict:
+        import requests
+
+        response = requests.post(f"{_API}/bot{self.token}/{method}", json=params, timeout=35)
+        response.raise_for_status()
+        return response.json()
+
+    def send(self, chat_id, text: str) -> None:
+        text = text or "(empty answer)"
+        for i in range(0, len(text), _MAX_LEN):
+            self.api("sendMessage", chat_id=chat_id, text=text[i:i + _MAX_LEN])
+
+    # -- message handling -----------------------------------------------------
+
+    def handle_message(self, chat_id, text: str) -> Optional[str]:
+        """One inbound message; returns the reply text (None = no reply).
+
+        Pure-ish: no polling, no threading — so it is directly testable.
+        Side effects: history file + one sendMessage per reply chunk.
+        """
+        chat_id = str(chat_id)
+        if self.allowed and chat_id not in self.allowed:
+            self.send(chat_id, "This bot is private. Ask the owner to add your chat id to JARVIS_TELEGRAM_ALLOWED_CHATS.")
+            return None
+
+        text = text.strip()
+        if text == "/reset":
+            self._history.pop(chat_id, None)
+            self._save_history()
+            self.send(chat_id, "Memory for this chat cleared.")
+            return None
+        if text == "/help" or text.startswith("/start"):
+            self.send(chat_id, _HELP)
+            return None
+
+        force_cloud = False
+        if text.startswith("/cloud"):
+            force_cloud = True
+            text = text[len("/cloud"):].strip()
+            if not text:
+                self.send(chat_id, "Usage: /cloud <question>")
+                return None
+
+        if self.brain is None:
+            self.brain = _lazy_brain()
+
+        try:
+            self.api("sendChatAction", chat_id=chat_id, action="typing")
+        except Exception:
+            pass  # cosmetic only
+
+        memory = self._history.get(chat_id, [])
+        try:
+            result = self.brain.run(text, memory=memory, force_cloud=force_cloud)
+        except Exception as exc:
+            _logger.exception("telegram turn failed")
+            self.send(chat_id, f"I hit a problem answering that ({exc.__class__.__name__}).")
+            return None
+
+        reply = str(getattr(result, "answer", "")).strip()
+        if not reply:
+            reply = "(I didn't get an answer.)"
+        self._history[chat_id] = (memory + [{"role": "user", "content": text},
+                                            {"role": "assistant", "content": reply}])[-2 * _HISTORY_TURNS:]
+        self._save_history()
+        self.send(chat_id, reply)
+        return reply
+
+    # -- poll loop ------------------------------------------------------------
+
+    def _poll_once(self, q: "queue.Queue") -> None:
+        """One long getUpdates call; enqueue any messages, advance the offset."""
+        import requests
+
+        params = {"offset": self._offset, "timeout": 30, "allowed_updates": ["message"]}
+        response = requests.post(f"{_API}/bot{self.token}/getUpdates", json=params, timeout=35)
+        if response.status_code == 409:
+            # Another poller is using this token (a second bot process).
+            _logger.warning("getUpdates 409: another JARVIS bot is already polling this token; waiting 60s")
+            time.sleep(60)
+            return
+        response.raise_for_status()
+        for update in response.json().get("result", []):
+            self._offset = max(self._offset, update.get("update_id", 0) + 1)
+            q.put(update)
+
+    def run(self) -> None:
+        """Block: poll forever on the main thread, run turns in one worker."""
+        q: "queue.Queue" = queue.Queue()
+        worker = threading.Thread(target=self._worker, args=(q,), name="jarvis-telegram", daemon=True)
+        worker.start()
+        _logger.info("JARVIS on Telegram: polling. /help in the bot lists commands.")
+        while True:
+            try:
+                self._poll_once(q)
+            except Exception as exc:
+                _logger.warning("poll failed (%s: %s); retrying in 5s", exc.__class__.__name__, exc)
+                time.sleep(5)
+
+    def _worker(self, q: "queue.Queue") -> None:
+        while True:
+            update = q.get()
+            message = update.get("message") or update.get("edited_message")
+            if not message or not message.get("text"):
+                continue
+            try:
+                self.handle_message(message["chat"]["id"], message["text"])
+            except Exception:
+                _logger.exception("telegram message handling failed")
+
+
+def _lazy_brain():
+    from jarvis.agent.brain import Brain
+
+    return Brain()
+
+
+__all__ = ["TelegramBot"]

@@ -32,3 +32,4 @@ orb/obj/
 orb_shell.err
 orb_shell.out
 kokoro_test.wav
+.telegram-history.json

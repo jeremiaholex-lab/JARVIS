@@ -125,6 +125,9 @@ def classify(action: PlannedAction) -> Tier:
         "google_read",
         "web_search",
         "notion_read",
+        "read_file",
+        "list_dir",
+        "search_files",
     }:
         return Tier.READ
 

@@ -121,6 +121,36 @@ def _web_search(query: str, limit: int = 5, freshness: str = "") -> str:
                        "cite": "attribute any claim you use to its domain"}, ensure_ascii=False)
 
 
+def _read_file(path: str, offset: int = 1, limit: int = 200) -> str:
+    """Read one text file (bounded), with the secret-file guard applied."""
+    from jarvis.skills.files import LocalFiles
+
+    try:
+        return json.dumps(LocalFiles().read_file(path, offset=offset, limit=limit), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": f"{exc.__class__.__name__}: {exc}"}, ensure_ascii=False)
+
+
+def _list_dir(path: str, limit: int = 100) -> str:
+    """One level of a directory: entry names, dirs marked with a slash."""
+    from jarvis.skills.files import LocalFiles
+
+    try:
+        return json.dumps(LocalFiles().list_dir(path, limit=limit), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": f"{exc.__class__.__name__}: {exc}"}, ensure_ascii=False)
+
+
+def _search_files(pattern: str, root: str, limit: int = 15) -> str:
+    """Case-insensitive substring match across a folder's text files."""
+    from jarvis.skills.files import LocalFiles
+
+    try:
+        return json.dumps(LocalFiles().search(pattern, root, limit=limit), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": f"{exc.__class__.__name__}: {exc}"}, ensure_ascii=False)
+
+
 def _notion_read(view: str = "search", query: str = "", limit: int = 8) -> str:
     """Read-only Notion notes; needs JARVIS_NOTION_TOKEN and pages shared with it."""
     from jarvis.skills.notion import NotionConnector
@@ -252,6 +282,52 @@ def build_tools() -> List[AgentTool]:
             "required": ["query"],
         },
     )
+    files_read = _check_tier(
+        "read_file",
+        _read_file,
+        "Read a text file on the user's computer by path (a line range: offset/limit). "
+        "Secret-shaped files (.env, tokens, keys) are refused by name. Use when the "
+        "answer lives in one specific file rather than the indexed document library.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "description": "first line, 1-based"},
+                "limit": {"type": "integer", "description": "max lines, default 200"},
+            },
+            "required": ["path"],
+        },
+    )
+    files_list = _check_tier(
+        "list_dir",
+        _list_dir,
+        "List one level of a directory on the user's computer (names only, dirs "
+        "marked with a slash). Use to find the path to pass to read_file or search_files.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "limit": {"type": "integer", "description": "max entries, default 100"},
+            },
+            "required": ["path"],
+        },
+    )
+    files_search = _check_tier(
+        "search_files",
+        _search_files,
+        "Search text files under a folder for a substring (case-insensitive), "
+        "returning 'path:line: text' matches. Skips binary files and secret-shaped "
+        "files. Use when you do not know which file holds the answer.",
+        {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "root": {"type": "string", "description": "folder to search under"},
+                "limit": {"type": "integer", "description": "max matches, default 15"},
+            },
+            "required": ["pattern", "root"],
+        },
+    )
     notion = _check_tier(
         "notion_read",
         _notion_read,
@@ -285,7 +361,8 @@ def build_tools() -> List[AgentTool]:
         "returns an explanation instead of sending anything.",
         {"type": "object", "properties": {"question": {"type": "string"}}},
     )
-    tools.extend([t for t in (projects, rag, google, web, notion, clock, screen) if t is not None])
+    tools.extend([t for t in (projects, rag, google, web, files_read, files_list,
+                               files_search, notion, clock, screen) if t is not None])
     return tools
 
 

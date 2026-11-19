@@ -109,13 +109,28 @@ def _google_read(view: str, limit: int = 8) -> str:
     return json.dumps({"view": view, "items": items}, ensure_ascii=False)
 
 
-def _microsoft_read(view: str, limit: int = 8) -> str:
-    """Read bounded summaries from connected Microsoft 365 mail, calendar, or tasks."""
-    from jarvis.skills.microsoft_365 import Microsoft365Connector
+def _web_search(query: str, limit: int = 5, freshness: str = "") -> str:
+    """Read-only DuckDuckGo search; no API key or account required."""
+    from jarvis.skills.web_search import WebSearchConnector
 
-    connector = Microsoft365Connector()
-    items = connector.fetch_view(view, limit=max(1, min(int(limit or 8), 20)))
-    return json.dumps({"platform": "Microsoft 365", "view": view, "items": items}, ensure_ascii=False)
+    try:
+        items = WebSearchConnector().fetch_view(query, limit=limit, freshness=freshness)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    return json.dumps({"query": query, "results": items,
+                       "cite": "attribute any claim you use to its domain"}, ensure_ascii=False)
+
+
+def _notion_read(view: str = "search", query: str = "", limit: int = 8) -> str:
+    """Read-only Notion notes; needs JARVIS_NOTION_TOKEN and pages shared with it."""
+    from jarvis.skills.notion import NotionConnector
+
+    connector = NotionConnector()
+    try:
+        items = connector.fetch_view(view, limit=limit, query=query)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    return json.dumps({"view": view, "items": items}, ensure_ascii=False)
 
 
 def _current_time() -> str:
@@ -221,17 +236,35 @@ def build_tools() -> List[AgentTool]:
             "required": ["view"],
         },
     )
-    microsoft = _check_tier(
-        "microsoft365_read",
-        _microsoft_read,
-        "Read limited metadata from the user's connected Microsoft 365 account. Choose view='email' "
-        "for recent Outlook sender/subject only, view='calendar' for today's events, or view='tasks' "
-        "for Microsoft To Do tasks. Read-only; returns at most 20 items.",
+    web = _check_tier(
+        "web_search",
+        _web_search,
+        "Search the web (DuckDuckGo, no account needed). Use for general questions "
+        "whose answer is not in the user's own data. Returns titles, snippets, and "
+        "domains; attribute any claim to its source.",
         {
             "type": "object",
             "properties": {
-                "view": {"type": "string", "enum": ["email", "calendar", "tasks"]},
-                "limit": {"type": "integer", "description": "Maximum results (1-20, default 8)"},
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "1-5, default 5"},
+                "freshness": {"type": "string", "description": "optional timelimit: d (day), w (week), m (month), y (year)"},
+            },
+            "required": ["query"],
+        },
+    )
+    notion = _check_tier(
+        "notion_read",
+        _notion_read,
+        "Read the user's Notion notes. view='search' lists matching pages/databases "
+        "(needs query); view='note' returns the readable body of the best-matching page "
+        "(needs query); view='databases' lists shared database names. Use when the "
+        "answer may live in their notes. Returns cited titles/URLs or body text.",
+        {
+            "type": "object",
+            "properties": {
+                "view": {"type": "string", "enum": ["search", "note", "databases"]},
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "1-20, default 8"},
             },
             "required": ["view"],
         },
@@ -252,7 +285,7 @@ def build_tools() -> List[AgentTool]:
         "returns an explanation instead of sending anything.",
         {"type": "object", "properties": {"question": {"type": "string"}}},
     )
-    tools.extend([t for t in (projects, rag, google, microsoft, clock, screen) if t is not None])
+    tools.extend([t for t in (projects, rag, google, web, notion, clock, screen) if t is not None])
     return tools
 
 

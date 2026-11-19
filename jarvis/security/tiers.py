@@ -123,7 +123,8 @@ def classify(action: PlannedAction) -> Tier:
         "cat",
         "jarvis_rag_search",
         "google_read",
-        "microsoft365_read",
+        "web_search",
+        "notion_read",
     }:
         return Tier.READ
 

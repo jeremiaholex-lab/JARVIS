@@ -12,11 +12,23 @@ ROOT = Path(__file__).resolve().parents[2]
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = ["User.Read", "Mail.Read", "Calendars.Read", "Tasks.Read"]
 
+# Personal (live.com/outlook/hotmail) Microsoft accounts sign in through the
+# consumer authority. A work/school account overrides via JARVIS_MICROSOFT_AUTHORITY.
+_DEFAULT_AUTHORITY = "https://login.microsoftonline.com/consumers"
+
 
 class Microsoft365Connector:
-    def __init__(self, client_id: str | None = None, cache_file: str | Path | None = None):
+    def __init__(
+        self,
+        client_id: str | None = None,
+        cache_file: str | Path | None = None,
+        authority: str | None = None,
+    ):
         self.client_id = (client_id or os.environ.get("JARVIS_MICROSOFT_CLIENT_ID", "")).strip()
         self.cache_file = Path(cache_file or ROOT / ".microsoft-token.bin")
+        self.authority = (
+            authority or os.environ.get("JARVIS_MICROSOFT_AUTHORITY") or _DEFAULT_AUTHORITY
+        ).strip()
 
     def _access_token(self) -> str:
         if not self.client_id:
@@ -32,9 +44,7 @@ class Microsoft365Connector:
         cache = msal.SerializableTokenCache()
         if self.cache_file.is_file():
             cache.deserialize(self.cache_file.read_text(encoding="utf-8"))
-        app = msal.PublicClientApplication(
-            self.client_id, authority="https://login.microsoftonline.com/common", token_cache=cache
-        )
+        app = msal.PublicClientApplication(self.client_id, authority=self.authority, token_cache=cache)
         accounts = app.get_accounts()
         result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
         if not result or "access_token" not in result:
@@ -58,9 +68,7 @@ class Microsoft365Connector:
         cache = msal.SerializableTokenCache()
         if self.cache_file.is_file():
             cache.deserialize(self.cache_file.read_text(encoding="utf-8"))
-        app = msal.PublicClientApplication(
-            self.client_id, authority="https://login.microsoftonline.com/common", token_cache=cache
-        )
+        app = msal.PublicClientApplication(self.client_id, authority=self.authority, token_cache=cache)
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             raise RuntimeError("Microsoft device sign-in could not start; check the client ID and app configuration.")

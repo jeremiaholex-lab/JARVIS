@@ -25,7 +25,8 @@ _logger = logging.getLogger(__name__)
 
 TOOL_GUIDANCE = (
     "You have read-only tools for the user's own data: their projects and "
-    "deadlines, their indexed documents, read-only Google and Microsoft 365 mail/calendar/task data, "
+    "deadlines, their indexed documents, read-only Google mail/calendar/task data, "
+    "their Notion notes, and a read-only web search. Use a tool "
     "and the current time. Use a tool "
     "whenever the answer depends on that data instead of guessing. Never "
     "invent a fact about the user's projects, files, or schedule. When you "

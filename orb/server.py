@@ -261,6 +261,8 @@ MODELS = Models()
 ENV = load_env_file(JARVIS / ".env")
 if ENV.get("JARVIS_MICROSOFT_CLIENT_ID"):
     os.environ.setdefault("JARVIS_MICROSOFT_CLIENT_ID", ENV["JARVIS_MICROSOFT_CLIENT_ID"])
+if ENV.get("JARVIS_NOTION_TOKEN"):
+    os.environ.setdefault("JARVIS_NOTION_TOKEN", ENV["JARVIS_NOTION_TOKEN"])
 SETTINGS = load_settings()
 
 

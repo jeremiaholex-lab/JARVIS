@@ -31,7 +31,6 @@ import json
 import logging
 import os
 import queue
-import re
 import threading
 import time
 from pathlib import Path
@@ -48,23 +47,21 @@ _HISTORY_TURNS = 5  # user+assistant pairs kept per chat
 # and the orb cannot drift (they did: Telegram captured any token where the orb
 # captured only fe_, so "yes, do it pw_x" was routed to the edit resolver).
 from jarvis.security.file_edit import (
-    CONFIRM_PHRASE,
-    EDIT_BARE_YES_RE,
-    EDIT_CANCEL_RE,
     EDIT_CONFIRM_RE,
     EDIT_PHRASE_MISPLACED_RE,
     WRITE_CONFIRM_RE,
 )
 
-# "yes pw_abc123" / "no pw_abc123" / "cancel pw_abc123" — settle a write.
+# "yes pw_abc123" / "no pw_abc123" / "cancel pw_abc123" — settle a write. A
+# fe_ token reaching this branch is handled by the startswith("fe_") case below,
+# so cancel and a bare yes for an edit are both settled here, not by separate
+# patterns.
 _CONFIRM_RE = WRITE_CONFIRM_RE
 # "yes, do it fe_abc..." — a file edit is destructive and needs the phrase.
 _EDIT_CONFIRM_RE = EDIT_CONFIRM_RE
 # A phrase aimed at anything else: answer offline rather than let the model
 # claim it applied something.
 _EDIT_PHRASE_MISPLACED_RE = EDIT_PHRASE_MISPLACED_RE
-_EDIT_BARE_YES_RE = EDIT_BARE_YES_RE
-_EDIT_CANCEL_RE = EDIT_CANCEL_RE
 _EDIT_PHRASE_HINT = (
     "{token} is a destructive file edit, so 'yes' alone will not apply it. "
     "Reply 'yes, do it {token}' to confirm it, or 'no {token}' to cancel."

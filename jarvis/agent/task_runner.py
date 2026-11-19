@@ -221,8 +221,15 @@ class TaskStore:
         params = (max_attempts, *excluded)
         with self._lock, self._connection() as db:
             row = db.execute(
-                "SELECT * FROM agent_tasks WHERE status='queued' AND attempts < ?" + exclusion +
-                " ORDER BY created_at LIMIT 1",
+                """SELECT * FROM agent_tasks
+                   WHERE status='queued' AND attempts < ?"""
+                + exclusion
+                + """ AND (depends_on='[]' OR depends_on IS NULL OR NOT EXISTS (
+                       SELECT 1 FROM agent_tasks d
+                       WHERE d.id IN (SELECT value FROM json_each(agent_tasks.depends_on))
+                       AND d.status != 'completed'
+                   ))
+                   ORDER BY is_plan_root, step_index, created_at LIMIT 1""",
                 params,
             ).fetchone()
             if row is None:
@@ -329,6 +336,120 @@ class TaskStore:
         if task.status in TERMINAL:
             raise ValueError(f"task is already {task.status}")
         return self.transition(task_id, "cancelled", error="")
+
+    def create_plan(self, plan: "Plan") -> tuple[AgentTask, list[AgentTask]]:
+        """Create root task and sub-tasks from a Plan."""
+        from jarvis.agent.planner import Plan as PlanType, PlanStep
+        if not isinstance(plan, PlanType):
+            raise TypeError("plan must be a Plan instance")
+        if not plan.steps:
+            raise ValueError("plan must have at least one step")
+
+        now = time.time()
+        root_id = uuid.uuid4().hex
+        plan_id = root_id  # plan_id equals root task id
+
+        with self._lock, self._connection() as db:
+            # Create root task
+            root_idempotency = f"{plan.idempotency_key}:root" if plan.idempotency_key else ""
+            db.execute(
+                """INSERT INTO agent_tasks(id,goal,status,created_at,updated_at,idempotency_key,
+                   plan_id,step_index,depends_on,is_plan_root)
+                   VALUES(?,?,'queued',?,?,?,?,?,'[]',1)""",
+                (root_id, plan.root_goal, now, now, root_idempotency, plan_id, -1),
+            )
+            self._event(db, root_id, "queued", {"goal": plan.root_goal, "is_plan_root": True})
+
+            # First pass: create sub-tasks with empty depends_on, collect IDs
+            index_to_id = {}
+            subtasks_info = []
+            for i, step in enumerate(plan.steps):
+                task_id = uuid.uuid4().hex
+                step_idempotency = f"{plan.idempotency_key}:step:{i}" if plan.idempotency_key else ""
+                index_to_id[step.index] = task_id
+                subtasks_info.append((task_id, step, step_idempotency))
+
+            # Second pass: update depends_on with actual task IDs
+            for task_id, step, step_idempotency in subtasks_info:
+                depends_on_ids = [index_to_id[dep_idx] for dep_idx in step.depends_on]
+                depends_on_json = json.dumps(depends_on_ids)
+
+                db.execute(
+                    """INSERT INTO agent_tasks(id,goal,status,created_at,updated_at,idempotency_key,
+                       plan_id,step_index,depends_on,is_plan_root)
+                       VALUES(?,?,'queued',?,?,?,?,?,?,0)""",
+                    (task_id, step.goal, now, now, step_idempotency, plan_id, step.index, depends_on_json),
+                )
+                self._event(db, task_id, "queued", {"goal": step.goal, "step_index": step.index, "depends_on": depends_on_ids})
+
+            # Build subtasks list with resolved IDs
+            subtasks: list[AgentTask] = []
+            for task_id, step, step_idempotency in subtasks_info:
+                depends_on_ids = [index_to_id[dep_idx] for dep_idx in step.depends_on]
+                subtasks.append(AgentTask(
+                    id=task_id, goal=step.goal, status="queued",
+                    created_at=now, updated_at=now, attempts=0, steps=0,
+                    checkpoint=None, result="", error="",
+                    idempotency_key=step_idempotency,
+                    plan_id=plan_id, step_index=step.index,
+                    depends_on=depends_on_ids, is_plan_root=False,
+                ))
+
+            # Return root task
+            root_row = db.execute("SELECT * FROM agent_tasks WHERE id=?", (root_id,)).fetchone()
+            root_task = self._decode(root_row)
+        return root_task, subtasks
+
+    def get_plan_tasks(self, plan_id: str) -> list[AgentTask]:
+        """Return all tasks in a plan (root + sub-tasks) ordered by step_index."""
+        with self._lock, self._connection() as db:
+            rows = db.execute(
+                "SELECT * FROM agent_tasks WHERE plan_id=? ORDER BY step_index",
+                (plan_id,),
+            ).fetchall()
+        return [self._decode(r) for r in rows]
+
+    def mark_deps_completed(self, completed_task_id: str) -> list[AgentTask]:
+        """Find tasks waiting on completed_task_id and re-queue them if all deps met."""
+        # First, get the completed task to find its plan_id
+        completed = self.get(completed_task_id)
+        if completed is None or not completed.plan_id:
+            return []
+
+        plan_id = completed.plan_id
+        now = time.time()
+        ready: list[AgentTask] = []
+
+        with self._lock, self._connection() as db:
+            # Find queued tasks in the same plan that depend on completed_task_id
+            rows = db.execute(
+                """SELECT * FROM agent_tasks
+                   WHERE plan_id=? AND status='queued'
+                   AND depends_on != '[]' AND depends_on IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1 FROM json_each(depends_on)
+                       WHERE value = ?
+                   )
+                   ORDER BY step_index""",
+                (plan_id, completed_task_id),
+            ).fetchall()
+
+            for row in rows:
+                task = self._decode(row)
+                # Check if ALL dependencies are completed
+                all_deps_completed = True
+                for dep_id in task.depends_on:
+                    dep_task = self.get(dep_id)
+                    if dep_task is None or dep_task.status != "completed":
+                        all_deps_completed = False
+                        break
+
+                if all_deps_completed:
+                    # Task is already queued, just ensure it's claimable (it already is)
+                    # We return it as "ready" - no state change needed
+                    ready.append(task)
+
+        return ready
 
 
 class DurableTaskRunner:

@@ -1,4 +1,6 @@
 from jarvis.agent.task_runner import DurableTaskRunner, StepResult, TaskStore
+from jarvis.agent.planner import Plan, PlanStep
+import json
 
 
 def test_task_store_has_plan_columns(tmp_path):
@@ -146,3 +148,74 @@ def test_step_limit_fails_without_extra_processor_calls(tmp_path):
     assert result.status == "failed"
     assert result.error == "maximum step limit reached"
     assert len(calls) == 1
+
+
+def test_create_plan_creates_root_and_subtasks(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    plan = Plan(root_goal="Test plan", steps=[
+        PlanStep(index=0, goal="Step A", depends_on=[]),
+        PlanStep(index=1, goal="Step B", depends_on=[0]),
+    ], idempotency_key="plan-key-1")
+    root, subtasks = store.create_plan(plan)
+    assert root.is_plan_root is True
+    assert root.plan_id == root.id
+    assert root.step_index == -1
+    assert len(subtasks) == 2
+    for i, st in enumerate(subtasks):
+        assert st.plan_id == root.id
+        assert st.step_index == i
+        # depends_on should be resolved to actual task IDs
+        if i == 0:
+            assert st.depends_on == []
+        else:
+            assert st.depends_on == [subtasks[0].id]
+        assert st.idempotency_key == f"plan-key-1:step:{i}"
+
+
+def test_get_plan_tasks_returns_ordered(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    plan = Plan(root_goal="Test", steps=[
+        PlanStep(index=0, goal="A", depends_on=[]),
+        PlanStep(index=1, goal="B", depends_on=[0]),
+    ], idempotency_key="k")
+    root, _ = store.create_plan(plan)
+    tasks = store.get_plan_tasks(root.id)
+    assert len(tasks) == 3  # root + 2 subtasks
+    assert tasks[0].is_plan_root
+    assert [t.step_index for t in tasks[1:]] == [0, 1]
+
+
+def test_mark_deps_completed_requeues_waiting_tasks(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    plan = Plan(root_goal="Test", steps=[
+        PlanStep(index=0, goal="A", depends_on=[]),
+        PlanStep(index=1, goal="B", depends_on=[0]),
+    ], idempotency_key="k")
+    root, subs = store.create_plan(plan)
+    # Complete step 0: claim -> running -> completed
+    store.claim_next(max_attempts=3)
+    store.transition(subs[0].id, "completed", result="done")
+    # Step 1 should now be claimable (was blocked by deps)
+    ready = store.mark_deps_completed(subs[0].id)
+    assert len(ready) == 1
+    assert ready[0].id == subs[1].id
+    # Note: mark_deps_completed returns tasks that became claimable
+
+
+def test_claim_next_skips_blocked_tasks(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    plan = Plan(root_goal="Test", steps=[
+        PlanStep(index=0, goal="A", depends_on=[]),
+        PlanStep(index=1, goal="B", depends_on=[0]),
+    ], idempotency_key="k")
+    root, subs = store.create_plan(plan)
+    # Step 1 should not be claimed while step 0 is pending
+    claimed = store.claim_next(max_attempts=3)
+    assert claimed is not None
+    assert claimed.id == subs[0].id  # step 0 claimed first
+    # Complete step 0: claim -> running -> completed
+    store.transition(subs[0].id, "completed", result="done")
+    # Now step 1 should be claimable
+    claimed2 = store.claim_next(max_attempts=3)
+    assert claimed2 is not None
+    assert claimed2.id == subs[1].id

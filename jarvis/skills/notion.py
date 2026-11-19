@@ -56,7 +56,12 @@ class NotionConnector:
         return response.json().get("results", [])
 
     def _search(self, query: str, limit: int) -> List[Dict]:
-        return self._post("/search", {"query": query, "page_size": max(1, min(limit, 20))}).get("results", [])
+        # Empty query to /search lists everything the integration can see —
+        # that is how the 'databases' view works.
+        body: Dict[str, object] = {"page_size": max(1, min(limit, 20))}
+        if query:
+            body["query"] = query
+        return self._post("/search", body).get("results", [])
 
     @staticmethod
     def _page_title(obj: Dict) -> str:

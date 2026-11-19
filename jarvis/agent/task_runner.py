@@ -21,7 +21,7 @@ from typing import Callable, Optional
 STATUSES = {"queued", "running", "waiting_confirmation", "completed", "failed", "cancelled"}
 TERMINAL = {"completed", "failed", "cancelled"}
 _ALLOWED_TRANSITIONS = {
-    "queued": {"running", "cancelled"},
+    "queued": {"running", "cancelled", "completed"},
     "running": {"queued", "waiting_confirmation", "completed", "failed", "cancelled"},
     "waiting_confirmation": {"queued", "cancelled"},
     "failed": {"queued", "cancelled"},
@@ -449,7 +449,38 @@ class TaskStore:
                     # We return it as "ready" - no state change needed
                     ready.append(task)
 
+        # Trigger plan completion check
+        self.check_plan_completion(plan_id)
         return ready
+
+    def check_plan_completion(self, plan_id: str) -> AgentTask | None:
+        """If all sub-tasks completed, mark root completed with aggregated results."""
+        with self._lock, self._connection() as db:
+            root = db.execute("SELECT * FROM agent_tasks WHERE plan_id=? AND is_plan_root=1", (plan_id,)).fetchone()
+            if not root:
+                return None
+
+            # Count sub-tasks
+            total = db.execute("SELECT COUNT(*) FROM agent_tasks WHERE plan_id=? AND is_plan_root=0", (plan_id,)).fetchone()[0]
+            done = db.execute("SELECT COUNT(*) FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='completed'", (plan_id,)).fetchone()[0]
+            failed = db.execute("SELECT COUNT(*) FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='failed'", (plan_id,)).fetchone()[0]
+
+            if done + failed == total and total > 0:
+                if failed > 0:
+                    # Aggregate errors
+                    errors = [r["error"] for r in db.execute(
+                        "SELECT error FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='failed'", (plan_id,)
+                    ).fetchall()]
+                    agg_error = f"{failed} sub-task(s) failed: " + "; ".join(errors[:3])
+                    return self.transition(root["id"], "failed", error=agg_error)
+                else:
+                    # Aggregate results
+                    results = [r["result"] for r in db.execute(
+                        "SELECT result FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='completed'", (plan_id,)
+                    ).fetchall()]
+                    agg_result = "Plan completed. " + " | ".join(results[:5])
+                    return self.transition(root["id"], "completed", result=agg_result)
+        return None
 
 
 class DurableTaskRunner:
@@ -532,7 +563,9 @@ class DurableTaskRunner:
             if result.waiting_confirmation:
                 return self.store.transition(task.id, "waiting_confirmation", result=result.result)
             if result.done:
-                return self.store.transition(task.id, "completed", result=result.result)
+                completed = self.store.transition(task.id, "completed", result=result.result)
+                self.store.mark_deps_completed(task.id)
+                return completed
             updated = self.store.get(task.id)
             if updated and updated.steps >= self.max_steps:
                 return self.store.transition(task.id, "failed", error="maximum step limit reached")

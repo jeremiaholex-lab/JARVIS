@@ -149,6 +149,10 @@ class Brain:
         from jarvis.agent.turn import run_turn
         from jarvis.security.tiers import Tier
 
+        if task.is_plan_root:
+            # Root task: just acknowledge plan start
+            return StepResult(done=True, result="Plan started", checkpoint={"plan_id": task.id})
+
         read_tools = [tool for tool in self.tools if tool.tier is Tier.READ]
         schemas = [schema for schema in self.schemas
                    if schema.get("function", {}).get("name") in {tool.name for tool in read_tools}]

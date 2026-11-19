@@ -219,3 +219,96 @@ def test_claim_next_skips_blocked_tasks(tmp_path):
     claimed2 = store.claim_next(max_attempts=3)
     assert claimed2 is not None
     assert claimed2.id == subs[1].id
+
+
+def test_full_plan_execution(tmp_path):
+    from jarvis.agent.task_runner import TaskStore, DurableTaskRunner, StepResult
+    from jarvis.agent.planner import Plan, PlanStep, decompose_goal
+    store = TaskStore(tmp_path / "tasks.db")
+
+    # Mock call_engine that returns a 2-step plan
+    def mock_engine(engine, msgs, tools):
+        # Planner goal decomposition
+        if "Decompose" in msgs[0]["content"]:
+            return {"content": json.dumps({"steps": [
+                {"index": 0, "goal": "Read file A", "depends_on": []},
+                {"index": 1, "goal": "Summarize file A", "depends_on": [0]},
+            ]})}
+        return {"content": "Done"}
+
+    plan = decompose_goal("Read and summarize", max_subtasks=5, call_engine=mock_engine)
+    root, subs = store.create_plan(plan)
+
+    # Processor for sub-tasks
+    def processor(task):
+        if task.is_plan_root:
+            return StepResult(done=False, result="Plan running")
+        return StepResult(done=True, checkpoint={"done": True}, result=f"Completed {task.goal}")
+
+    runner = DurableTaskRunner(store, processor, max_attempts=2, max_steps=20, timeout_seconds=10)
+
+    # Drain all tasks
+    runner.drain(max_tasks=10)
+
+    # Check store for completion
+    all_tasks = store.list()
+    completed = [t for t in all_tasks if t.status == "completed"]
+    assert len(completed) == 3
+
+    # Root result should aggregate
+    root_final = store.get(root.id)
+    assert root_final.status == "completed"
+    assert "Plan completed" in root_final.result
+
+
+def test_recover_interrupted_plan_resumes_from_last_completed(tmp_path):
+    from jarvis.agent.task_runner import TaskStore
+    from jarvis.agent.planner import Plan, PlanStep
+    path = tmp_path / "tasks.db"
+    store = TaskStore(path)
+    plan = Plan(root_goal="Test", steps=[
+        PlanStep(index=0, goal="A", depends_on=[]),
+        PlanStep(index=1, goal="B", depends_on=[0]),
+    ], idempotency_key="k")
+    root, subs = store.create_plan(plan)
+    # Simulate: step 0 completed, step 1 running, then crash
+    store.transition(subs[0].id, "completed", result="done")
+    store.transition(subs[1].id, "running")  # was claimed
+    # New store instance (simulates restart)
+    store2 = TaskStore(path)
+    recovered = store2.recover_interrupted()
+    # Root should be queued; step 0 completed; step 1 re-queued
+    root2 = store2.get(root.id)
+    assert root2.status == "queued"
+    step1 = store2.get(subs[1].id)
+    assert step1.status == "queued"  # recovered from running
+    # step 0 stays completed
+    step0 = store2.get(subs[0].id)
+    assert step0.status == "completed"
+
+
+def test_plan_timeout_fails_root_blocks_subtask_retries(tmp_path):
+    from jarvis.agent.task_runner import TaskStore, DurableTaskRunner
+    from jarvis.agent.planner import Plan, PlanStep
+    import time
+    store = TaskStore(tmp_path / "tasks.db")
+    plan = Plan(root_goal="Test", steps=[
+        PlanStep(index=0, goal="Slow", depends_on=[]),
+    ], idempotency_key="k")
+    root, subs = store.create_plan(plan)
+    def slow_processor(task):
+        time.sleep(0.5)
+        from jarvis.agent.task_runner import StepResult
+        return StepResult(done=True, result="done")
+    runner = DurableTaskRunner(store, slow_processor, max_attempts=2, max_steps=10, timeout_seconds=0.1)
+    runner.run_once()  # root (instant)
+    runner.run_once()  # sub-task times out
+    root_final = store.get(root.id)
+    assert root_final.status == "failed"
+    assert "timeout" in root_final.error.lower()
+    # Sub-task should be failed with worker-continues error
+    sub_final = store.get(subs[0].id)
+    assert sub_final.status == "failed"
+    assert "worker continues" in sub_final.error
+
+

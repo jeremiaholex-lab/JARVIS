@@ -677,6 +677,8 @@ def _task_public(task):
         "created_at": task.created_at, "updated_at": task.updated_at,
         "attempts": task.attempts, "steps": task.steps,
         "checkpoint": task.checkpoint, "result": task.result, "error": task.error,
+        "plan_id": task.plan_id, "step_index": task.step_index,
+        "depends_on": task.depends_on, "is_plan_root": task.is_plan_root,
     }
 
 
@@ -685,6 +687,10 @@ def _process_agent_task(task):
     from jarvis.agent.task_runner import StepResult
     from jarvis.agent.turn import run_turn
     from jarvis.security.tiers import Tier
+
+    if task.is_plan_root:
+        # Root task: just acknowledge plan start
+        return StepResult(done=True, result="Plan started", checkpoint={"plan_id": task.id})
 
     ctx = agent_context()
     read_tools = [tool for tool in ctx.tools if tool.tier is Tier.READ]
@@ -720,6 +726,21 @@ async def _durable_task_loop(app):
             task = await asyncio.to_thread(runner.run_once)
             if task is not None:
                 app.state.last_agent_task = {"id": task.id, "status": task.status}
+                # Emit plan_progress WS event for sub-task completion
+                if task.plan_id and not task.is_plan_root:
+                    payload = json.dumps({
+                        "type": "plan_progress",
+                        "plan_id": task.plan_id,
+                        "step_index": task.step_index,
+                        "status": task.status,
+                        "result": task.result,
+                        "error": task.error,
+                    })
+                    for client in list(CLIENTS):
+                        try:
+                            client.queue.put_nowait(payload)
+                        except Exception:
+                            pass
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -848,11 +869,15 @@ def build_app():
         return bool(supplied) and hmac.compare_digest(supplied, app.state.task_api_token)
 
     @app.get("/api/tasks")
-    def list_agent_tasks(request: Request, limit: int = 20, active_only: bool = False):
+    def list_agent_tasks(request: Request, limit: int = 20, active_only: bool = False, plan_id: str = ""):
         if not _authorize_task_request(request):
             return JSONResponse({"error": "loopback, same-origin request with task token required"}, status_code=403)
         store = _task_store()
-        return JSONResponse({"tasks": [_task_public(t) for t in store.list(limit=limit, include_terminal=not active_only)]})
+        if plan_id:
+            tasks = store.get_plan_tasks(plan_id)
+        else:
+            tasks = store.list(limit=limit, include_terminal=not active_only)
+        return JSONResponse({"tasks": [_task_public(t) for t in tasks]})
 
     @app.post("/api/tasks")
     async def create_agent_task(request: Request):

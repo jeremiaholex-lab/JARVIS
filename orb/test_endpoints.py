@@ -102,6 +102,37 @@ def test_durable_task_api_queues_reports_and_cancels_locally():
         server.MODELS.ready = was_ready
 
 
+def test_plan_id_filter_returns_root_and_subtasks():
+    client, was_ready = _client()
+    try:
+        headers = {"x-jarvis-task-token": client.app.state.task_api_token}
+        from jarvis.agent.task_runner import TaskStore
+        from jarvis.agent.planner import Plan, PlanStep
+        store = server._task_store()
+        # Clean up database before test
+        with store._connection() as db:
+            db.execute("DELETE FROM agent_tasks")
+            db.execute("DELETE FROM agent_task_events")
+        # Use unique idempotency key to avoid conflicts
+        plan = Plan(root_goal="Test plan", steps=[
+            PlanStep(index=0, goal="Step A", depends_on=[]),
+            PlanStep(index=1, goal="Step B", depends_on=[0]),
+        ], idempotency_key="plan-test-filter-1")
+        root, subs = store.create_plan(plan)
+        with client:
+            # Get all tasks without filter
+            all_tasks = client.get("/api/tasks", headers=headers).json()["tasks"]
+            assert len(all_tasks) >= 3
+            # Get plan tasks with filter
+            plan_tasks = client.get(f"/api/tasks?plan_id={root.id}", headers=headers).json()["tasks"]
+            assert len(plan_tasks) == 3  # root + 2 subtasks
+            assert plan_tasks[0]["id"] == root.id
+            assert plan_tasks[0]["is_plan_root"] is True
+            assert [t["step_index"] for t in plan_tasks[1:]] == [0, 1]
+    finally:
+        server.MODELS.ready = was_ready
+
+
 def test_tiers_endpoint_is_honest_about_what_the_orb_enforces():
     client, was_ready = _client()
     try:

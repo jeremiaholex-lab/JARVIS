@@ -185,9 +185,15 @@ class TelegramBot:
         if self.brain is None:
             self.brain = _lazy_brain()
 
+        # Tokens are minted lowercase, but re.IGNORECASE applies to the capture
+        # group too, so a shouted confirmation hands us FE_X. Normalise at the
+        # point the token enters routing: the startswith("fe_") check below and
+        # the executor lookups are both case-sensitive, and the executor's own
+        # normalisation cannot help a token that was routed to the wrong surface.
         confirm = _EDIT_CONFIRM_RE.match(text)
         if confirm:
-            return self._resolve_edit_reply(chat_id, True, confirm.group(2), confirm.group(1))
+            return self._resolve_edit_reply(chat_id, True, confirm.group(2).lower(),
+                                            confirm.group(1))
         misplaced = _EDIT_PHRASE_MISPLACED_RE.match(text)
         if misplaced:
             # "yes, do it pw_x" — the phrase is for edits, the token is not an
@@ -198,7 +204,7 @@ class TelegramBot:
         confirm = _CONFIRM_RE.match(text)
         if confirm:
             approved = confirm.group(1).lower() == "yes"
-            token = confirm.group(2)
+            token = confirm.group(2).lower()
             if token.startswith("fe_"):
                 if approved:
                     # "yes fe_x" is not enough for a destructive edit: leave it

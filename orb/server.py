@@ -1268,10 +1268,11 @@ def build_app():
                 if bare_yes:
                     # Do not run a turn: a bare yes applies nothing, and the
                     # model would claim otherwise.
-                    note = (f"{bare_yes.group(1)} is a destructive file edit, so "
+                    token = bare_yes.group(1).lower()
+                    note = (f"{token} is a destructive file edit, so "
                             f"'yes' alone will not apply it. Type "
-                            f"'{CONFIRM_PHRASE} {bare_yes.group(1)}' to confirm "
-                            f"it, or 'no {bare_yes.group(1)}' to cancel.")
+                            f"'{CONFIRM_PHRASE} {token}' to confirm "
+                            f"it, or 'no {token}' to cancel.")
                     c.remember("user", text)
                     c.remember("assistant", note, "edits")
                     c.emit(q, "chat", role="system", text=note, engine="edits")
@@ -1279,7 +1280,11 @@ def build_app():
                 if edit_confirm or edit_cancel:
                     confirmed = bool(edit_confirm)
                     phrase = edit_confirm.group(1) if confirmed else ""
-                    token = (edit_confirm or edit_cancel).group(2)
+                    # re.IGNORECASE uppercases the captured token too, and the
+                    # card id is built from the lowercase one — a shouted
+                    # confirmation would otherwise apply the edit and then fail
+                    # to find its own card, leaving it on screen forever.
+                    token = (edit_confirm or edit_cancel).group(2).lower()
                     result = await asyncio.to_thread(
                         agent_context().resolve_edit, token, confirmed, phrase)
                     if result.get("error"):

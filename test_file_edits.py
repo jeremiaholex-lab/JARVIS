@@ -232,6 +232,54 @@ def test_shouted_confirmation_can_be_undone(editor, target):
     assert target.read_text() == original
 
 
+def test_shouted_edit_token_never_reaches_the_write_resolver():
+    """Executor normalisation is not enough: Telegram routes on the raw token.
+
+    ``token.startswith("fe_")`` is case-sensitive, so an uppercased edit token
+    fell through to resolve_write — a different executor, which then reported
+    "unknown write token" for an edit that was plainly pending. Drives the real
+    handle_message rather than a copy of its branches.
+    """
+    import jarvis.channels.telegram as tg
+
+    class FakeBrain:
+        def __init__(self):
+            self.edits, self.writes = [], []
+
+        def resolve_edit(self, token, approved, phrase=""):
+            self.edits.append((token, approved, phrase))
+            return {"token": token, "approved": approved, "outcome": {"applied": approved}}
+
+        def resolve_write(self, token, approved):
+            self.writes.append((token, approved))
+            return {"token": token, "approved": approved, "outcome": {}}
+
+        def pending_writes(self):
+            return []
+
+        def pending_edits(self):
+            return []
+
+    bot = tg.TelegramBot(token="test", brain=FakeBrain())
+    bot.send = lambda chat_id, text: None
+    bot.api = lambda method, **params: {"result": []}
+
+    for text in ("YES, DO IT FE_CD34", "CANCEL FE_CD34"):
+        bot.handle_message(1, text)
+    # A bare yes is answered with the phrase hint and never reaches a resolver.
+    bot.handle_message(1, "YES FE_CD34")
+
+    assert bot.brain.writes == [], "an edit token must never reach the write resolver"
+    assert [t for t, _, _ in bot.brain.edits] == ["fe_cd34", "fe_cd34"]
+    assert [a for _, a, _ in bot.brain.edits] == [True, False]
+    # The phrase survives routing intact — the executor still checks it.
+    assert bot.brain.edits[0][2] and "do it" in bot.brain.edits[0][2].lower()
+
+    # And a write token still goes to the write surface, lowered.
+    bot.handle_message(1, "YES PW_AB12")
+    assert bot.brain.writes == [("pw_ab12", True)]
+
+
 # -------------------------------------------------- confirmation grammar (hosts)
 #
 # These import the real grammar from file_edit rather than re-declaring a copy.

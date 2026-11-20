@@ -356,6 +356,19 @@ class Models:
             target=self._warm_tts, name="jarvis-tts-warmup", daemon=True)
         self.warmup_thread.start()
 
+    def new_oww(self):
+        """A fresh openWakeWord instance for one audio stream.
+
+        The model keeps a sliding feature buffer across `predict()` calls, so
+        sharing one instance between clients interleaves unrelated audio and
+        the wake word stops firing for everyone. Each websocket client scores
+        its own stream with its own model; ONNX 'hey jarvis' is small enough
+        that this costs seconds of RAM per surface, not gigabytes.
+        """
+        import openwakeword
+        return openwakeword.Model(
+            wakeword_models=["hey jarvis"], inference_framework="onnx")
+
     def _warm_tts(self) -> None:
         """Load Kokoro's model and voice pipeline before the first reply."""
         started = time.time()
@@ -687,7 +700,10 @@ class Client:
         self.muted = False
         self.queue: asyncio.Queue = asyncio.Queue()
         self.buffer = np.zeros(0, dtype=np.float32)   # VAD accumulation
-        self.pcm_ring = np.zeros(0, dtype=np.float32)  # OWW sliding window
+        # openWakeWord's preprocessor expects raw int16 samples: feeding it
+        # normalized float32 (amplitude ~1.0) produced silent zeros for every
+        # real-voice frame — wake_peak stayed 0.0 across thousands of frames.
+        self.pcm_ring = np.zeros(0, dtype=np.int16)    # OWW sliding window
         self.wake_frames = 0                           # predictions this session
         self.wake_peak = 0.0                           # highest score seen
         self.audio_chunks = 0                          # browser audio messages
@@ -710,6 +726,7 @@ class Client:
         self.barge_audio_samples = 0
         self.barge_in = False
         self.playback_active = False
+        self.oww = None
         # Conversation context comes from the persistent store, so a window
         # reload or reconnect does not erase what JARVIS was just told.
         self.memory = memory
@@ -1507,6 +1524,14 @@ def build_app():
                         return
 
         pumper = asyncio.create_task(pump())
+        try:
+            # per-client wake scorer: the shared one corrupts its feature
+            # buffer the moment a second stream feeds it
+            c.oww = await asyncio.to_thread(MODELS.new_oww)
+        except Exception:
+            _logger.warning("could not create per-client wake model; "
+                            "falling back to shared instance")
+            c.oww = None
         CLIENTS.add(c)
         try:
             await _session(c, q, wsc)
@@ -1546,7 +1571,7 @@ def build_app():
                 c.followup_streak = 0
             with c.lock:
                 c.buffer = np.zeros(0, dtype=np.float32)
-                c.pcm_ring = np.zeros(0, dtype=np.float32)
+                c.pcm_ring = np.zeros(0, dtype=np.int16)
             c.wake_frames, c.wake_peak = 0, 0.0
             c.emit(q, "state", state="listening", reason=reason)
 
@@ -1732,6 +1757,7 @@ def build_app():
                 c.emit(q, "error", message="Invalid mic audio frame; expected mono 16-bit PCM.")
                 return
             pcm = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+            raw = np.frombuffer(chunk, dtype=np.int16)
             c.audio_chunks += 1
             c.audio_samples += len(pcm)
             c.last_audio_at = time.time()
@@ -1792,8 +1818,8 @@ def build_app():
                 # Frames are now consumed as they complete instead.
                 with c.lock:
                     c.pcm_ring = (
-                        np.concatenate([c.pcm_ring, pcm])
-                        if c.pcm_ring.size else pcm
+                        np.concatenate([c.pcm_ring, raw])
+                        if c.pcm_ring.size else raw
                     )
                     frames = len(c.pcm_ring) // OWW_FRAME
                     batch = [c.pcm_ring[i * OWW_FRAME:(i + 1) * OWW_FRAME]
@@ -1802,7 +1828,7 @@ def build_app():
 
                 for frame in batch:
                     try:
-                        scores = MODELS.oww.predict(frame)
+                        scores = (c.oww or MODELS.oww).predict(frame)
                     except Exception as exc:
                         _logger.warning("wake-word predict failed: %s", exc)
                         break
@@ -1960,7 +1986,7 @@ def build_app():
                 c.playback_active = False
                 with c.lock:
                     c.buffer = np.zeros(0, dtype=np.float32)
-                    c.pcm_ring = np.zeros(0, dtype=np.float32)
+                    c.pcm_ring = np.zeros(0, dtype=np.int16)
                 c.emit(q, "state", state="muted" if c.muted else "idle")
             elif op == "settings":
                 for k in ("local_model", "voice", "wake_threshold", "vad_tail_s", "stt_beam_size",

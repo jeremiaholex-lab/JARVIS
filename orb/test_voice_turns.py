@@ -124,7 +124,12 @@ class RecordingOWW:
         self.frames = []
 
     def predict(self, frame):
-        self.frames.append(np.asarray(frame, dtype=np.float32).copy())
+        arr = np.asarray(frame)
+        # openWakeWord's preprocessor needs int16 amplitudes; a normalized
+        # float feed scores 0.0 on real speech, which is exactly the bug
+        # that kept the wake word dead while every other stage looked fine.
+        assert arr.dtype == np.int16, f"OWW must receive int16, got {arr.dtype}"
+        self.frames.append(arr.copy())
         return {"hey jarvis": 0.0}
 
 
@@ -192,6 +197,7 @@ def ws_env(monkeypatch):
     oww = RecordingOWW()
     whisper = StubWhisper()
     server.MODELS.oww = oww
+    monkeypatch.setattr(server.MODELS, "new_oww", lambda: oww)
     server.MODELS.whisper = whisper
     server.MODELS.vad_model = object()
     silero_vad.get_speech_timestamps = lambda *a, **kw: []

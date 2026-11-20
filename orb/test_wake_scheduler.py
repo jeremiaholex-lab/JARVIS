@@ -28,7 +28,9 @@ class RecordingOWW:
         self.fire_at = fire_at  # index at which to report a wake
 
     def predict(self, frame):
-        self.frames.append(np.asarray(frame, dtype=np.float32).copy())
+        arr = np.asarray(frame)
+        assert arr.dtype == np.int16, f"OWW must receive int16, got {arr.dtype}"
+        self.frames.append(arr.copy())
         score = 0.0
         if self.fire_at is not None and len(self.frames) == self.fire_at:
             score = 0.9
@@ -42,6 +44,7 @@ def client(monkeypatch):
     server.MODELS.ready = True
     oww = RecordingOWW()
     monkeypatch.setattr(server.MODELS, "oww", oww)
+    monkeypatch.setattr(server.MODELS, "new_oww", lambda: oww)
     app = server.build_app()
     with TestClient(app, client=("127.0.0.1", 12345)) as c:
         yield c, oww
@@ -113,6 +116,7 @@ def test_wake_word_actually_triggers_listening(monkeypatch):
     server.MODELS.ready = True
     oww = RecordingOWW(fire_at=3)
     monkeypatch.setattr(server.MODELS, "oww", oww)
+    monkeypatch.setattr(server.MODELS, "new_oww", lambda: oww)
     monkeypatch.setattr(server.MODELS, "vad_model", object())
     # Once the third frame fires, handle_audio_chunk immediately runs maybe-
     # close-utterance on the accumulated audio. Stub that to keep this test on
@@ -143,6 +147,7 @@ def test_wake_peak_is_reported_for_threshold_debugging(monkeypatch):
     server.MODELS.ready = True
     oww = RecordingOWW()
     monkeypatch.setattr(server.MODELS, "oww", oww)
+    monkeypatch.setattr(server.MODELS, "new_oww", lambda: oww)
     app = server.build_app()
     try:
         with TestClient(app, client=("127.0.0.1", 12345)) as c:

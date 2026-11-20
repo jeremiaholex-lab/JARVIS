@@ -1,0 +1,322 @@
+{
+ "nudge-cannot-see": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "nudge-cant-access": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "nudge-good-answer": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "nudge-not-able": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "nudge-promise-check": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "nudge-promise-search": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "nudge-used-tools": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "retry-hedge-unanchored": {
+  "cat": "retry",
+  "ms": 0.0,
+  "pass": true
+ },
+ "retry-not-sure": {
+  "cat": "retry",
+  "ms": 0.0,
+  "pass": true
+ },
+ "retry-short-correct": {
+  "cat": "retry",
+  "ms": 0.0,
+  "pass": true
+ },
+ "retry-tools-ran": {
+  "cat": "retry",
+  "ms": 0.0,
+  "pass": true
+ },
+ "retry-two-word-q": {
+  "cat": "retry",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-analyze": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "route-calendar": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-doc-search": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-explain": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "route-explicit-cloud": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-force-cloud": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-force-cloud-no-key": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-goodmorning": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-greeting": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "route-joke": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "route-longform": {
+  "cat": "routing",
+  "ms": 0.7,
+  "pass": true
+ },
+ "route-math": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-no-key": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-reminder": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "route-slow-local": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "route-slow-local-short": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-thanks": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-time": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "route-weather": {
+  "cat": "routing",
+  "ms": 0.0,
+  "pass": true
+ },
+ "route-weekly-summary": {
+  "cat": "routing",
+  "ms": 0.1,
+  "pass": true
+ },
+ "screen-brightness": {
+  "cat": "screen",
+  "ms": 0.0,
+  "pass": true
+ },
+ "screen-clean-monitor": {
+  "cat": "screen",
+  "ms": 0.0,
+  "pass": true
+ },
+ "screen-earlier-error": {
+  "cat": "screen",
+  "ms": 0.1,
+  "pass": true
+ },
+ "screen-looking-at": {
+  "cat": "screen",
+  "ms": 1137.8,
+  "pass": true
+ },
+ "screen-lower-display": {
+  "cat": "screen",
+  "ms": 0.0,
+  "pass": true
+ },
+ "screen-on-screen": {
+  "cat": "screen",
+  "ms": 0.2,
+  "pass": true
+ },
+ "screen-read-window": {
+  "cat": "screen",
+  "ms": 0.5,
+  "pass": true
+ },
+ "screen-see-window": {
+  "cat": "screen",
+  "ms": 0.0,
+  "pass": true
+ },
+ "screen-weather": {
+  "cat": "screen",
+  "ms": 0.0,
+  "pass": true
+ },
+ "screen-which-window": {
+  "cat": "screen",
+  "ms": 0.0,
+  "pass": true
+ },
+ "screen-window-settings": {
+  "cat": "screen",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-browser-nav": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-file-edit": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-list-windows": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-look-screen": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-projects-read": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-projects-write": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-read-file": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-sandbox": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-shell-ls": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-shell-rm": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-task-enqueue": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-unknown-default": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "tier-web-search": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
+ "turn-complexity-cloud-only": {
+  "cat": "turn",
+  "ms": 0.2,
+  "pass": true
+ },
+ "turn-confidence-escalation": {
+  "cat": "turn",
+  "ms": 0.2,
+  "pass": true
+ },
+ "turn-local-fail-cloud": {
+  "cat": "turn",
+  "ms": 0.2,
+  "pass": true
+ },
+ "turn-nudge-loop": {
+  "cat": "turn",
+  "ms": 0.4,
+  "pass": true
+ },
+ "turn-screen-steer": {
+  "cat": "turn",
+  "ms": 0.2,
+  "pass": true
+ },
+ "turn-simple-local": {
+  "cat": "turn",
+  "ms": 29.3,
+  "pass": true
+ },
+ "turn-tool-limit-no-tools-last": {
+  "cat": "turn",
+  "ms": 0.7,
+  "pass": true
+ },
+ "turn-tool-roundtrip": {
+  "cat": "turn",
+  "ms": 1.0,
+  "pass": true
+ }
+}

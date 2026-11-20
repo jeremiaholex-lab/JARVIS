@@ -86,8 +86,13 @@ def test_speech_slice_safety_padding():
 
 
 def test_run_whisper_passes_accent_optimized_params():
-    """Ensure run_whisper configures beam_size=5, condition_on_previous_text=False,
-    and initial_prompt."""
+    """Ensure run_whisper configures the beam it is given, plus
+    condition_on_previous_text=False and initial_prompt.
+
+    The beam itself is a governor decision (shed to 1 under memory
+    pressure — covered by test_governor.py), so this pins the forwarding
+    behavior with the decision stubbed: run_whisper must use the same
+    beam_size for best_of, not a hardcoded constant."""
     mock_whisper = MagicMock()
     mock_segment = MagicMock()
     mock_segment.text = "what are my deadlines"
@@ -95,7 +100,8 @@ def test_run_whisper_passes_accent_optimized_params():
 
     dummy_audio = np.zeros(16000, dtype=np.float32)
 
-    with patch.object(server.MODELS, "whisper", mock_whisper):
+    with patch.object(server.MODELS, "whisper", mock_whisper), \
+            patch.object(server, "_stt_beam_size", lambda: 5):
         text, duration = server.run_whisper(dummy_audio)
 
     assert text == "what are my deadlines"

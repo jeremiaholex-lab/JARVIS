@@ -62,6 +62,8 @@ PROMISES_ACTION = re.compile(
 LOW_CONFIDENCE = re.compile(
     r"^\s*(i (do not|don't|cannot|can't) know|i'?m not sure|as an ai|"
     r"i have no (idea|way to know)|unable to|sorry|i (could not|couldn't) (find|answer|say|tell|verify)|"
+    r"i (can'?t|cannot) (access|find|see|read|open|check|verify|tell you)|"
+    r"i (was|were) ?(not|n't) able to|"
     r"i don't have (access|information|the|way))\b",
     re.I,
 )

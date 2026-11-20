@@ -161,13 +161,31 @@ def describe_screen(
 
 
 _VISION_HINT = re.compile(
-    r"\b(screen|display|monitor|what (do|can) you see|look at this|on my (screen|desktop))\b",
+    r"\b(screen|display|monitor|what (do|can) you see|look at this|on my (screen|desktop)|"
+    r"this window|that window|which window|what window)\b|"
+    r"\bwhat am i looking at\b",
+    re.I,
+)
+
+# An imperative about the display hardware is not a question about its
+# contents: "turn up the screen brightness" matches the hint on the word
+# "screen" but a screenshot answers nothing. Mixed sentences ("what's on my
+# screen — oh and turn the brightness down") lose the pre-pass steer, which
+# is the safe direction: the model still has the tool and can choose it.
+_VISION_NOT_CONTENT = re.compile(
+    r"\b(brightness|volume|contrast|resolution|refresh rate|screensaver|pixel)\b"
+    r"|\b(turn|turn (up|down)|lower|raise|increase|dim)\b[^.?!]*\b(screen|display|monitor)\b"
+    r"|\b(clean|wipe|dust|repair|replace|buy)\b[^.?!]*\b(screen|display|monitor)\b"
+    r"|\b(screen|display|monitor)\b[^.?!]*\b(clean|wipe|dust|repair|replace)\b",
     re.I,
 )
 
 
 def looks_like_screen_request(text: str) -> bool:
-    return bool(_VISION_HINT.search(text or ""))
+    t = text or ""
+    if _VISION_NOT_CONTENT.search(t):
+        return False
+    return bool(_VISION_HINT.search(t))
 
 
 def _clean(text: str) -> str:

@@ -5,30 +5,30 @@
 <title>JARVIS — Orb Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,400;1,500&family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
   color-scheme: dark;
-  --bg: #07080d;
-  --panel: rgba(18, 21, 31, .72);
-  --panel-2: rgba(24, 28, 41, .72);
-  --inset: rgba(5, 6, 10, .6);
-  --edge: rgba(255, 255, 255, .09);
-  --edge-2: rgba(255, 255, 255, .05);
-  --ink: #eceff8;
-  --ink-dim: #a3abc0;
-  --ink-faint: #7a8398;
-  --accent-rgb: 140, 170, 255;
+  --bg: #09090b;
+  --panel: rgba(20, 19, 18, .74);
+  --panel-2: rgba(28, 26, 24, .74);
+  --inset: rgba(6, 6, 7, .62);
+  --edge: rgba(232, 208, 160, .15);
+  --edge-2: rgba(232, 208, 160, .08);
+  --ink: #f3eee4;
+  --ink-dim: #b9b2a4;
+  --ink-faint: #7f796d;
+  --accent-rgb: 214, 180, 118;
   --brass: rgb(var(--accent-rgb));
   --brass-deep: rgba(var(--accent-rgb), .45);
-  --ok: #7fd6a0;
-  --bad: #ff8a80;
-  --warn: #f2c46b;
-  --ink-title: #d6dbea;
-  --rust: rgba(255, 110, 100, .16);
-  --rust-edge: rgba(255, 110, 100, .45);
-  --rust-ink: #ffb3ab;
-  --disp: "Manrope", "Segoe UI", system-ui, sans-serif;
+  --ok: #8fcfa3;
+  --bad: #f09a8e;
+  --warn: #e6bf72;
+  --ink-title: #e9e2d3;
+  --rust: rgba(240, 120, 105, .14);
+  --rust-edge: rgba(240, 120, 105, .42);
+  --rust-ink: #f6b8ae;
+  --disp: "Cormorant Garamond", "Palatino Linotype", Georgia, serif;
   --body: "Manrope", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
@@ -429,7 +429,7 @@ body:not(.hud) section h2 .mini { font: 400 10px var(--mono); color: var(--ink-f
 
 /* ---------------- Phase 5: floating HUD overlay ---------------- */
 #hudbar, #hudnote { display: none; }
-body.hud { background: #07080d; }
+body.hud { background: #09090b; }
 body.hud #app { display: block; height: 100vh; }
 body.hud header, body.hud .side, body.hud footer, body.hud #controls { display: none; }
 body.hud main { display: block; height: 100%; }
@@ -479,6 +479,165 @@ body.hud #hudnote.show { opacity: 1; }
   .orb-col { min-width: 0; }
   .side { max-width: none; min-width: 0; border-left: 0; border-top: 1px solid var(--edge-2); padding: 14px; }
   section h2 .mini { display: none; }
+}
+
+/* ---------------- v3: classic premium ---------------- */
+body { font-family: var(--body); letter-spacing: .005em; -webkit-font-smoothing: antialiased; }
+body:not(.hud) {
+  background: radial-gradient(120% 90% at 50% 0%, #15130f 0%, #0b0a09 55%, #070706 100%);
+}
+body:not(.hud)::before {
+  background:
+    radial-gradient(46% 46% at 50% 40%, rgba(var(--accent-rgb), .12), transparent 72%),
+    radial-gradient(80% 50% at 50% 118%, rgba(var(--accent-rgb), .07), transparent 70%),
+    radial-gradient(140% 100% at 50% 50%, transparent 55%, rgba(0,0,0,.55) 100%);
+}
+/* fine engraved frame */
+body:not(.hud)::after {
+  content: ""; position: fixed; inset: 10px; pointer-events: none; z-index: 0;
+  border: 1px solid var(--edge-2); border-radius: 18px;
+}
+
+body:not(.hud) header { padding: 26px 40px 0; }
+body:not(.hud) header h1 {
+  font: 600 24px/1 var(--disp); letter-spacing: .46em; text-transform: uppercase; opacity: 1;
+  color: var(--ink); display: inline-flex; align-items: center; gap: 16px;
+  text-shadow: 0 0 24px rgba(var(--accent-rgb), .25);
+}
+body:not(.hud) header h1::before, body:not(.hud) header h1::after {
+  content: ""; width: 26px; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .7));
+}
+body:not(.hud) header h1::after { transform: scaleX(-1); }
+body:not(.hud) #conn { font: 500 10px var(--mono); letter-spacing: .2em; color: var(--ink-faint); }
+body:not(.hud) #conn.ok { color: var(--ink-dim); }
+body:not(.hud) #conn.ok::before { background: var(--brass); box-shadow: 0 0 10px rgba(var(--accent-rgb), .8); }
+
+#btnPanel {
+  background: rgba(255,255,255,.02); border: 1px solid var(--edge); border-radius: 50%;
+  width: 38px; height: 38px; color: var(--ink-dim); margin-left: 6px;
+}
+#btnPanel:hover, #btnPanel[aria-expanded="true"] {
+  color: var(--brass); border-color: var(--brass-deep); background: rgba(var(--accent-rgb), .07);
+}
+
+body:not(.hud) .orb-col { padding: 0 32px 40px; }
+#orbstate {
+  font: 600 11px var(--body); letter-spacing: .5em; padding-left: .5em; margin-top: 2px; opacity: 1;
+  display: flex; align-items: center; justify-content: center; gap: 14px; color: rgb(var(--accent-rgb));
+}
+#orbstate::before, #orbstate::after { content: ""; width: 22px; height: 1px; background: currentColor; opacity: .45; }
+#caption {
+  max-width: 660px; font: 500 24px/1.38 var(--disp); color: var(--ink); letter-spacing: .005em;
+  margin-top: 18px; min-height: 66px; max-height: 5.6em;
+}
+#caption.user { font: italic 400 19px/1.4 var(--disp); color: var(--ink-faint); }
+
+/* composer */
+#quickrow {
+  width: min(600px, 100%); margin-top: 10px; padding: 7px; border-radius: 999px;
+  background: linear-gradient(180deg, rgba(30,28,25,.82), rgba(16,15,14,.82));
+  border: 1px solid var(--edge);
+  box-shadow: 0 18px 50px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,236,196,.07), inset 0 0 0 1px rgba(0,0,0,.4);
+}
+#quickrow:focus-within {
+  border-color: rgba(var(--accent-rgb), .55);
+  box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 4px rgba(var(--accent-rgb), .09), inset 0 1px 0 rgba(255,236,196,.07);
+}
+#quickinput { font: 400 15px var(--body); padding: 12px 8px 12px 22px; letter-spacing: .01em; }
+#quickinput::placeholder { color: var(--ink-faint); }
+#quickrow button {
+  width: 42px; height: 42px; background: rgba(255,255,255,.03); color: var(--ink-dim);
+  box-shadow: inset 0 0 0 1px var(--edge-2);
+}
+#quickrow button:hover { background: rgba(var(--accent-rgb), .1); color: var(--brass); box-shadow: inset 0 0 0 1px var(--brass-deep); }
+#quickrow button.on {
+  background: linear-gradient(180deg, rgb(var(--accent-rgb)), rgba(var(--accent-rgb), .78));
+  color: #0b0a08; box-shadow: 0 0 22px rgba(var(--accent-rgb), .35), inset 0 1px 0 rgba(255,255,255,.35);
+}
+#quickrow button.warn { background: var(--rust); color: var(--rust-ink); box-shadow: inset 0 0 0 1px var(--rust-edge); }
+
+/* the stage yields to the drawer so the orb and caption stay centred in the
+   visible half, not behind the panel. Only when there is room for both. */
+body:not(.hud) .orb-col { transition: padding-right .32s cubic-bezier(.2,.8,.2,1); }
+@media (min-width: 1100px) {
+  body.drawer:not(.hud) .orb-col { padding-right: min(478px, 42vw); }
+}
+
+/* drawer */
+body:not(.hud) .side {
+  top: 18px; right: 18px; bottom: 18px; width: min(450px, calc(100% - 36px));
+  background: linear-gradient(180deg, rgba(22,20,18,.93), rgba(11,10,9,.95));
+  border: 1px solid var(--edge); border-radius: 18px; padding: 18px;
+  box-shadow: 0 30px 90px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,236,196,.06);
+}
+#tabs { background: transparent; padding: 0; gap: 22px; border-bottom: 1px solid var(--edge-2); border-radius: 0; }
+#tabs button {
+  flex: none; border-radius: 0; padding: 8px 2px 11px; margin-bottom: -1px;
+  font: 600 20px var(--disp); letter-spacing: .03em; color: var(--ink-faint);
+  border-bottom: 1px solid transparent; background: transparent !important;
+}
+#tabs button:hover { color: var(--ink-dim); }
+#tabs button.on { color: var(--ink); border-bottom-color: var(--brass); }
+body:not(.hud) section {
+  background: linear-gradient(180deg, rgba(255,240,210,.035), rgba(255,240,210,.012));
+  border: 1px solid var(--edge-2); border-radius: 14px; padding: 16px;
+}
+body:not(.hud) section h2 {
+  font: 600 18px var(--disp); letter-spacing: .02em; color: var(--ink); text-transform: none;
+  padding-bottom: 10px; margin-bottom: 14px; border-bottom: 1px solid var(--edge-2);
+}
+body:not(.hud) section h2 .mini { font: 400 10px var(--mono); letter-spacing: .08em; color: var(--ink-faint); }
+
+/* conversation */
+.msg { font-size: 14px; line-height: 1.58; }
+.msg .who { font: 600 9.5px var(--body); letter-spacing: .26em; color: var(--ink-faint); }
+.msg.assistant .who { color: rgba(var(--accent-rgb), .85); }
+.msg.assistant .body { font: 500 17px/1.5 var(--disp); color: var(--ink); }
+.msg.user .body { color: var(--ink-dim); }
+.msg .badge { border-color: var(--edge); color: var(--ink-faint); letter-spacing: .08em; }
+#chatrow input, .setrow select, .setrow input[type=text], .setrow input[type=password] {
+  background: rgba(0,0,0,.35); border-color: var(--edge-2); border-radius: 10px; color: var(--ink);
+}
+#chatrow input:focus, .setrow select:focus, .setrow input[type=text]:focus, .setrow input[type=password]:focus {
+  border-color: var(--brass-deep); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .1);
+}
+
+/* buttons */
+#chatsend, #btnSave {
+  background: linear-gradient(180deg, rgb(var(--accent-rgb)), rgba(var(--accent-rgb), .8)); color: #0b0a08;
+  border: 0; border-radius: 10px; font: 700 11px var(--body); letter-spacing: .14em; text-transform: uppercase;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 6px 18px rgba(var(--accent-rgb), .18);
+}
+#btnSaveKey, #btnTestAudio, #btnRefreshP4, #btnAddWatcher {
+  background: rgba(255,255,255,.025); border: 1px solid var(--edge); color: var(--ink-dim);
+  border-radius: 10px; font: 600 11px var(--body); letter-spacing: .1em; text-transform: uppercase; padding: 9px 15px; cursor: pointer;
+}
+#btnSaveKey:hover, #btnTestAudio:hover, #btnRefreshP4:hover, #btnAddWatcher:hover {
+  color: var(--brass); border-color: var(--brass-deep); background: rgba(var(--accent-rgb), .06);
+}
+.msg.write-confirm .wc-actions button[data-act="yes"] { color: var(--brass); border-color: var(--brass-deep); background: rgba(var(--accent-rgb), .06); }
+
+/* cards and data */
+.card, .skill-card, .audit-strip, #audioDebug { background: rgba(0,0,0,.28); border-color: var(--edge-2); }
+.setrow label { font-size: 12px; color: var(--ink-faint); letter-spacing: .02em; }
+.setrow .val, .audit-strip .row .etype { color: var(--brass); }
+.tier-status .dot.live, footer .dot.on { background: var(--brass); box-shadow: 0 0 8px rgba(var(--accent-rgb), .6); }
+::selection { background: rgba(var(--accent-rgb), .3); }
+*::-webkit-scrollbar-thumb { background: rgba(232,208,160,.14); }
+*::-webkit-scrollbar-thumb:hover { background: rgba(232,208,160,.28); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+@media (max-width: 880px) {
+  body:not(.hud) header { padding: 20px 20px 0; }
+  body:not(.hud) header h1 { font-size: 19px; letter-spacing: .34em; }
+  body:not(.hud) header h1::before, body:not(.hud) header h1::after { width: 14px; }
+  #caption { font-size: 20px; }
+  body:not(.hud)::after { inset: 6px; }
+  /* the drawer becomes a full sheet rather than a half panel over the orb */
+  body:not(.hud) .side { left: 12px; right: 12px; top: 12px; bottom: 12px; width: auto; }
 }
 </style>
 </head>
@@ -1438,11 +1597,11 @@ cv.addEventListener("wheel", e => { e.preventDefault(); zoom = Math.max(0.7, Mat
 /* Cool-to-warm state colour: idle periwinkle, listening teal, thinking violet,
    speaking amber, muted grey. Values ease toward the target each frame. */
 const TARGETS = {
-  idle:      { rgb: [140, 170, 255], hot: [226, 236, 255], dim: 1,    auto: 0.12, spin: 0.06, label: "STANDBY" },
-  listening: { rgb: [70, 214, 200],  hot: [205, 255, 246], dim: 1,    auto: 0.25, spin: 0.15, label: "LISTENING" },
-  thinking:  { rgb: [168, 124, 255], hot: [232, 214, 255], dim: 1,    auto: 1.4,  spin: 0.9,  label: "PROCESSING" },
-  speaking:  { rgb: [255, 164, 104], hot: [255, 226, 194], dim: 1,    auto: 0.4,  spin: 0.2,  label: "SPEAKING" },
-  muted:     { rgb: [104, 108, 120], hot: [160, 164, 176], dim: 0.4,  auto: 0,    spin: 0,    label: "OFFLINE" },
+  idle:      { rgb: [214, 180, 118], hot: [255, 241, 208], dim: 1,    auto: 0.12, spin: 0.06, label: "STANDBY" },
+  listening: { rgb: [112, 200, 184], hot: [214, 255, 244], dim: 1,    auto: 0.25, spin: 0.15, label: "LISTENING" },
+  thinking:  { rgb: [166, 142, 228], hot: [236, 224, 255], dim: 1,    auto: 1.4,  spin: 0.9,  label: "PROCESSING" },
+  speaking:  { rgb: [232, 150, 118], hot: [255, 224, 204], dim: 1,    auto: 0.4,  spin: 0.2,  label: "SPEAKING" },
+  muted:     { rgb: [112, 108, 100], hot: [168, 162, 152], dim: 0.4,  auto: 0,    spin: 0,    label: "OFFLINE" },
 };
 const cur = JSON.parse(JSON.stringify(TARGETS.idle));
 function lerpTo(dt) {

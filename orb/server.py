@@ -233,6 +233,8 @@ def default_settings() -> dict:
         "stt_beam_size": 5,
         "followup_window_s": FOLLOWUP_WINDOW_S,
         "followup_max_streak": FOLLOWUP_MAX_STREAK,
+        "barge_rms_threshold": 0.025,
+        "barge_min_frames": 4,
         # Context window handed to Ollama. 4096 is deliberate: see
         # AgentContext.call_engine - the framework default of 16384 reserves a
         # ~3 GB KV cache that this machine cannot spare alongside the voice
@@ -701,6 +703,13 @@ class Client:
         self.followup_streak = 0
         self.listen_reason = "wake-word"
         self.last_vad = 0.0
+        self.turn_task: asyncio.Task | None = None
+        self.barge_frames = 0
+        self.barge_candidate: list[np.ndarray] = []
+        self.barge_audio: list[np.ndarray] = []
+        self.barge_audio_samples = 0
+        self.barge_in = False
+        self.playback_active = False
         # Conversation context comes from the persistent store, so a window
         # reload or reconnect does not erase what JARVIS was just told.
         self.memory = memory
@@ -1364,6 +1373,11 @@ def build_app():
         # Deriving durable facts costs a model call; do it after the reply has
         # been spoken, never in front of it.
         asyncio.create_task(_learn_about_user(ctx, text))
+        c.playback_active = True
+        c.barge_frames = 0
+        c.barge_candidate.clear()
+        c.barge_audio.clear()
+        c.barge_audio_samples = 0
         c.emit(q, "state", state="speaking")
         try:
             # The model is initialized during startup; the warmup is only a
@@ -1410,11 +1424,13 @@ def build_app():
             # A spoken reply resets the silent follow-up streak: the next
             # grace window after it starts fresh, capped again from zero.
             c.followup_streak = 0
-            c.emit(q, "state", state="idle")
+            # Keep the visible state at SPEAKING until the browser confirms
+            # playback completion (or the watchdog recovers a lost event).
         except Exception as exc:
             _logger.exception("TTS response pipeline failed")
             c.emit(q, "error", message=f"TTS failed: {exc}")
             c.emit(q, "tts_done", bytes=0)
+            c.playback_active = False
             c.emit(q, "state", state="idle")
 
     # ------------------------------------------------------------ proactive
@@ -1497,6 +1513,9 @@ def build_app():
         finally:
             CLIENTS.discard(c)
             cleanup_tasks = [pumper]
+            if c.turn_task and not c.turn_task.done():
+                c.turn_task.cancel()
+                cleanup_tasks.append(c.turn_task)
             if c.watchdog:
                 cleanup_tasks.append(c.watchdog)
             for task in cleanup_tasks:
@@ -1530,6 +1549,70 @@ def build_app():
                 c.pcm_ring = np.zeros(0, dtype=np.float32)
             c.wake_frames, c.wake_peak = 0, 0.0
             c.emit(q, "state", state="listening", reason=reason)
+
+        async def run_voice_turn(slice_: np.ndarray) -> None:
+            """Transcribe and answer an utterance without blocking mic intake."""
+            current = asyncio.current_task()
+            c.barge_in = False
+            try:
+                c.emit(q, "state", state="thinking")
+                text, stt_ms = await asyncio.to_thread(run_whisper, slice_)
+                trace = [{"name": "stt", "ms": round(stt_ms * 1000),
+                          "payload": {"text": text,
+                                      "seconds": round(len(slice_) / SAMPLE_RATE, 1),
+                                      "model": "faster-whisper small int8"}}]
+                if not text:
+                    c.emit(q, "trace", trace=trace)
+                    c.emit(q, "state", state="idle")
+                    c.emit(q, "error", message="could not understand that — try again")
+                    return
+                c.emit(q, "chat", role="user", text=text, engine="whisper")
+                verdict = resolve_voice_confirmation(
+                    text, agent_context().pending_writes(),
+                    agent_context().pending_edits())
+                if verdict is not None:
+                    await settle_confirmation(c, q, verdict, user_text=text)
+                    c.thinking = False
+                    if c.watchdog:
+                        c.watchdog.cancel()
+                    c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
+                    await start_listening("follow-up")
+                    return
+                await do_turn(c, q, text, trace, force_cloud=False)
+                if c.watchdog:
+                    c.watchdog.cancel()
+                c.watchdog = asyncio.create_task(_speak_watchdog(c, q, timeout=30.0))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _logger.exception("voice turn failed")
+                c.emit(q, "error", message=f"Voice turn failed: {exc}")
+                c.emit(q, "state", state="idle")
+            finally:
+                if current is c.turn_task:
+                    c.turn_task = None
+                if not c.barge_in and not c.playback_active:
+                    c.thinking = False
+
+        async def run_text_turn(text: str, force_cloud: bool = False) -> None:
+            current = asyncio.current_task()
+            try:
+                c.thinking = True
+                c.emit(q, "state", state="thinking")
+                await do_turn(c, q, text, [], force_cloud=force_cloud)
+                if c.watchdog:
+                    c.watchdog.cancel()
+                c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _logger.exception("text turn failed")
+                c.emit(q, "error", message=f"Turn failed: {exc}")
+                c.emit(q, "state", state="idle")
+            finally:
+                if current is c.turn_task:
+                    c.turn_task = None
+                c.thinking = False
 
         async def maybe_close_utterance() -> None:
             if not c.listening or c.thinking or c.muted:
@@ -1580,42 +1663,7 @@ def build_app():
             start_idx = max(0, int(segs[0]["start"]) - pad_lead)
             end_idx = min(len(audio), int(segs[-1]["end"]) + pad_trail)
             slice_ = audio[start_idx:end_idx]
-            c.emit(q, "state", state="thinking")
-            text, stt_ms = await asyncio.to_thread(run_whisper, slice_)
-            trace = [{"name": "stt", "ms": round(stt_ms * 1000),
-                     "payload": {"text": text,
-                                 "seconds": round(len(slice_) / SAMPLE_RATE, 1),
-                                 "model": "faster-whisper small int8"}}]
-            if not text:
-                c.thinking = False
-                c.emit(q, "trace", trace=trace)
-                c.emit(q, "state", state="idle")
-                c.emit(q, "error", message="could not understand that — try again")
-                return
-            c.emit(q, "chat", role="user", text=text, engine="whisper")
-            # Roadmap #8: a spoken confirmation is settled offline, exactly
-            # like the typed one — the phrase never reaches the model.
-            verdict = resolve_voice_confirmation(
-                text, agent_context().pending_writes(),
-                agent_context().pending_edits())
-            if verdict is not None:
-                await settle_confirmation(c, q, verdict, user_text=text)
-                c.thinking = False
-                if c.watchdog:
-                    c.watchdog.cancel()
-                c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
-                # The floor just changed (or the user mis-spoke and needs to
-                # retry): re-open a follow-up window so the conversation keeps
-                # flowing without the wake word. The streak cap still bounds it.
-                await start_listening("follow-up")
-                return
-            await do_turn(c, q, text, trace, force_cloud=False)
-            c.thinking = False
-            if c.watchdog:
-                c.watchdog.cancel()
-            c.watchdog = asyncio.create_task(
-                _speak_watchdog(c, q, timeout=30.0)
-            )
+            c.turn_task = asyncio.create_task(run_voice_turn(slice_))
 
         async def _speak_watchdog(cc: Client, qq, timeout: float) -> None:
             """If the orb dies mid-playback the TTS-end event never arrives;
@@ -1626,6 +1674,7 @@ def build_app():
                 return
             if cc.state in ("thinking", "speaking"):
                 cc.thinking = False
+                cc.playback_active = False
                 cc.emit(qq, "state", state="idle")
 
         async def settle_confirmation(c, q, verdict: dict, user_text: str = "") -> bool:
@@ -1686,7 +1735,52 @@ def build_app():
             c.audio_chunks += 1
             c.audio_samples += len(pcm)
             c.last_audio_at = time.time()
-            if not c.thinking and c.state != "speaking":
+            if c.playback_active and not c.muted:
+                # Echo cancellation is enabled in getUserMedia. Still require
+                # several consecutive above-floor frames before interrupting,
+                # so a click or residual speaker echo cannot cut off a reply.
+                rms = float(np.sqrt(np.mean(pcm * pcm))) if pcm.size else 0.0
+                c.barge_audio.append(pcm.copy())
+                c.barge_audio_samples += len(pcm)
+                max_preroll = int(0.5 * SAMPLE_RATE)
+                while c.barge_audio and c.barge_audio_samples > max_preroll:
+                    excess = c.barge_audio_samples - max_preroll
+                    first = c.barge_audio[0]
+                    if len(first) <= excess:
+                        c.barge_audio.pop(0)
+                        c.barge_audio_samples -= len(first)
+                    else:
+                        c.barge_audio[0] = first[excess:]
+                        c.barge_audio_samples -= excess
+                if rms >= float(SETTINGS.get("barge_rms_threshold", 0.025)):
+                    c.barge_frames += 1
+                    c.barge_candidate.append(pcm.copy())
+                else:
+                    c.barge_frames = 0
+                    c.barge_candidate.clear()
+                if c.barge_frames >= int(SETTINGS.get("barge_min_frames", 4)):
+                    captured = np.concatenate(c.barge_audio) if c.barge_audio else pcm
+                    c.barge_candidate.clear()
+                    c.barge_audio.clear()
+                    c.barge_audio_samples = 0
+                    c.barge_frames = 0
+                    c.barge_in = True
+                    c.playback_active = False
+                    c.emit(q, "barge_in")
+                    if c.watchdog:
+                        c.watchdog.cancel()
+                        c.watchdog = None
+                    task = c.turn_task
+                    if task and not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                    c.thinking = False
+                    await start_listening("barge-in")
+                    with c.lock:
+                        c.buffer = captured[-int(0.5 * SAMPLE_RATE):]
+                    return
+                return
+            if not c.playback_active:
                 # openWakeWord wants contiguous 1280-sample (80 ms) frames.
                 #
                 # The previous scheduler kept a `oww_last_len` cursor into a
@@ -1727,7 +1821,12 @@ def build_app():
                         )
                         if c.buffer.size > int(MAX_UTTERANCE_S * SAMPLE_RATE):
                             c.buffer = c.buffer[-int(MAX_UTTERANCE_S * SAMPLE_RATE):]
-                    if time.time() - c.last_vad > VAD_POLL_S:
+                    # >= not >: with VAD_POLL_S at 0 (tests) Windows'
+                    # ~15.6 ms clock tick can make `now - last_vad` exactly
+                    # 0.0, and a strict > would skip the poll that closes
+                    # the utterance — flaky on fast feeds, harmless at the
+                    # production cadence.
+                    if time.time() - c.last_vad >= VAD_POLL_S:
                         c.last_vad = time.time()
                         await maybe_close_utterance()
 
@@ -1789,17 +1888,11 @@ def build_app():
                     await settle_confirmation(c, q, {"kind": "note", "note": note},
                                               user_text=text)
                     continue
-                c.thinking = True
-                c.emit(q, "state", state="thinking")
-                trace: list[dict] = []
-                try:
-                    await do_turn(c, q, text, trace,
-                                  force_cloud=bool(msg.get("force_cloud")))
-                finally:
-                    c.thinking = False
-                if c.watchdog:
-                    c.watchdog.cancel()
-                c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
+                if c.turn_task and not c.turn_task.done():
+                    c.emit(q, "error", message="JARVIS is already handling a turn.")
+                    continue
+                c.turn_task = asyncio.create_task(
+                    run_text_turn(text, force_cloud=bool(msg.get("force_cloud"))))
             elif op == "confirm_write":
                 # Resolve a queued write (from a jarvis_projects_write this
                 # host proposed). This is the only mutation path; it lands in
@@ -1844,6 +1937,11 @@ def build_app():
                         else f"Reverted {result.get('path', 'the file')}.")
                 c.emit(q, "chat", role="system", text=note, engine="edits")
             elif op == "playback_done":
+                c.playback_active = False
+                c.barge_frames = 0
+                c.barge_candidate.clear()
+                c.barge_audio.clear()
+                c.barge_audio_samples = 0
                 if c.watchdog:
                     c.watchdog.cancel()
                     c.watchdog = None
@@ -1859,6 +1957,7 @@ def build_app():
             elif op == "mute":
                 c.muted = bool(msg.get("on"))
                 c.listening = False
+                c.playback_active = False
                 with c.lock:
                     c.buffer = np.zeros(0, dtype=np.float32)
                     c.pcm_ring = np.zeros(0, dtype=np.float32)
@@ -1866,6 +1965,7 @@ def build_app():
             elif op == "settings":
                 for k in ("local_model", "voice", "wake_threshold", "vad_tail_s", "stt_beam_size",
                           "followup_window_s", "followup_max_streak",
+                          "barge_rms_threshold", "barge_min_frames",
                           "tiers", "cloud", "vision"):
                     if k in msg:
                         SETTINGS[k] = msg[k]

@@ -244,6 +244,64 @@ def test_playback_done_opens_the_followup_window(ws_env):
         assert m["reason"] == "follow-up"
 
 
+def test_playback_done_clears_barge_state_and_opens_followup(ws_env):
+    c, _env = ws_env
+    with c.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        client = next(iter(server.CLIENTS))
+        client.playback_active = True
+        client.barge_frames = 2
+        client.barge_candidate = [np.ones(320, dtype=np.float32)]
+        ws.send_json({"op": "playback_done"})
+        wait_for_op(ws, "state", state="listening")
+        assert client.playback_active is False
+        assert client.barge_frames == 0
+        assert client.barge_candidate == []
+
+
+def test_barge_in_requires_sustained_audio_and_reopens_listening(ws_env):
+    c, _env = ws_env
+    with c.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        client = next(iter(server.CLIENTS))
+        client.playback_active = True
+        client.emit(client.queue, "state", state="speaking")
+        quiet = np.zeros(320, dtype=np.int16)
+        loud = np.full(320, 5000, dtype=np.int16)
+
+        ws.send_json({"op": "audio", "data": base64.b64encode(quiet.tobytes()).decode()})
+        assert client.playback_active is True
+        assert client.barge_frames == 0
+
+        for _ in range(3):
+            ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
+        assert client.playback_active is True
+        assert client.barge_frames == 3
+
+        ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
+        assert wait_for_op(ws, "state", state="listening")["reason"] == "barge-in"
+        assert client.playback_active is False
+        assert client.listening is True
+        assert client.barge_candidate == []
+        # Pre-roll includes the quiet frame immediately before speech so the
+        # first word is not clipped at the interruption threshold.
+        assert len(client.buffer) == 1600
+
+
+def test_barge_in_muted_is_ignored(ws_env):
+    c, _env = ws_env
+    with c.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        client = next(iter(server.CLIENTS))
+        client.playback_active = True
+        client.muted = True
+        loud = np.full(320, 5000, dtype=np.int16)
+        for _ in range(5):
+            ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
+        assert client.playback_active is True
+        assert client.barge_frames == 0
+
+
 def test_playback_done_while_muted_goes_idle(ws_env):
     c, _env = ws_env
     with c.websocket_connect("/ws") as ws:

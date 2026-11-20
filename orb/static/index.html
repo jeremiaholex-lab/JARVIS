@@ -849,11 +849,35 @@ let ttsQueue = [];
 let ttsPlaying = false;
 let ttsStreamDone = false;
 let ttsBytes = 0;
+let ttsCurrentUrl = null;
+let ttsGeneration = 0;
+function cancelTTS() {
+  ttsGeneration++;
+  for (const url of ttsQueue) URL.revokeObjectURL(url);
+  ttsQueue = [];
+  ttsChunks.length = 0;
+  ttsStreamDone = false;
+  ttsPlaying = false;
+  if (audioEl) {
+    audioEl.onended = null;
+    audioEl.onerror = null;
+    audioEl.pause();
+    audioEl.removeAttribute("src");
+    audioEl.load();
+  }
+  if (ttsCurrentUrl) URL.revokeObjectURL(ttsCurrentUrl);
+  ttsCurrentUrl = null;
+  analyser = null; speakingLevel = 0; spkBins.fill(0);
+  audioDebug("listening — speech interrupted", true);
+}
 async function pumpQueue() {
   if (ttsPlaying || !ttsQueue.length) return;
   const url = ttsQueue.shift();
+  const generation = ttsGeneration;
+  ttsCurrentUrl = url;
   ttsPlaying = true;
   const ac = await wakeAudio();
+  if (generation !== ttsGeneration) { URL.revokeObjectURL(url); return; }
   try {
     if (!audioEl) audioEl = new Audio();
     if (!audioElSourced) {
@@ -865,12 +889,14 @@ async function pumpQueue() {
     audioEl.src = url;
     audioEl.onended = () => {
       URL.revokeObjectURL(url);
+      if (ttsCurrentUrl === url) ttsCurrentUrl = null;
       ttsPlaying = false;
       if (ttsQueue.length) pumpQueue();
       else if (ttsStreamDone) endSpeech();
     };
     audioEl.onerror = () => {
       URL.revokeObjectURL(url);
+      if (ttsCurrentUrl === url) ttsCurrentUrl = null;
       ttsPlaying = false;
       audioDebug("audio element failed: " + audioEl.error, false);
       if (ttsQueue.length) pumpQueue(); else if (ttsStreamDone) endSpeech();
@@ -879,6 +905,8 @@ async function pumpQueue() {
     audioDebug("speaking (" + Math.round(ttsBytes / 1024) + " KB)", true);
   } catch (e) {
     URL.revokeObjectURL(url);
+    if (generation !== ttsGeneration) return;
+    if (ttsCurrentUrl === url) ttsCurrentUrl = null;
     ttsPlaying = false;
     wsSend("playback_done");
     showErr("no voice reply: " + e.message);
@@ -1115,6 +1143,7 @@ function handleOp(m) {
     case "trace": renderTrace(m.trace); break;
     case "tts_flush": flushSentence(m.index, m.ms); break;
     case "tts_done": finishTTS(); break;
+    case "barge_in": cancelTTS(); break;
     case "alert":
       addMsg("assistant", "Noticed: " + (m.alert && m.alert.text || ""), "proactive");
       if (HUD_MODE) hudNote("Noticed: " + (m.alert && m.alert.text || ""));

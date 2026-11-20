@@ -1144,6 +1144,19 @@ function handleOp(m) {
     case "tts_flush": flushSentence(m.index, m.ms); break;
     case "tts_done": finishTTS(); break;
     case "barge_in": cancelTTS(); break;
+    case "pressure": {
+      const note = m.state === "critical"
+        ? "LOW MEMORY — background work paused (stt in fast mode)"
+        : m.state === "warn"
+          ? "memory tight — eco mode: fast transcription, learning paused"
+          : "memory recovered — background work resumed";
+      const el = document.getElementById("errline");
+      if (el) el.textContent = note;
+      const diag = document.getElementById("micDiag");
+      if (diag) diag.textContent = note + (m.available_gb != null ? " · " + m.available_gb + " GB free" : "");
+      if (HUD_MODE) hudNote(note, 8000);
+      break;
+    }
     case "alert":
       addMsg("assistant", "Noticed: " + (m.alert && m.alert.text || ""), "proactive");
       if (HUD_MODE) hudNote("Noticed: " + (m.alert && m.alert.text || ""));

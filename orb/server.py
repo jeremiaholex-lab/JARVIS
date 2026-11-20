@@ -397,11 +397,30 @@ if ENV.get("JARVIS_MICROSOFT_CLIENT_ID"):
 if ENV.get("JARVIS_NOTION_TOKEN"):
     os.environ.setdefault("JARVIS_NOTION_TOKEN", ENV["JARVIS_NOTION_TOKEN"])
 SETTINGS = load_settings()
+_GOVERNOR = None
+
+
+def _governor():
+    """Lazily built memory governor (see jarvis.agent.governor)."""
+    from jarvis.agent.governor import MemoryGovernor
+    global _GOVERNOR
+    if _GOVERNOR is None:
+        _GOVERNOR = MemoryGovernor(
+            warn_gb=float(os.environ.get("JARVIS_MEM_WARN_GB", 1.6)),
+            critical_gb=float(os.environ.get("JARVIS_MEM_CRITICAL_GB", 0.9)),
+        )
+    return _GOVERNOR
+
+
+def _stt_beam_size() -> int:
+    """Configured beam, shed to 1 under memory pressure (governor). The env
+    overrides let the governor path be exercised on a healthy machine."""
+    return _governor().whisper_beam_size(SETTINGS.get("stt_beam_size", 5))
 
 
 def run_whisper(audio: np.ndarray) -> tuple[str, float]:
     t0 = time.time()
-    beam_size = int(SETTINGS.get("stt_beam_size", 5))
+    beam_size = _stt_beam_size()
     segs, _info = MODELS.whisper.transcribe(
         audio,
         beam_size=beam_size,
@@ -906,15 +925,34 @@ def _process_agent_task(task):
 
 
 async def _durable_task_loop(app):
-    """Poll bounded read-only tasks and opt-in local filesystem watchers."""
+    """Poll bounded read-only tasks and opt-in local filesystem watchers.
+
+    Under CRITICAL memory the loop keeps ticking but starts no new work:
+    a schedule slot fires late instead of being lost, watchers catch up
+    later, and a turn the user asked for is never cut — background work is
+    the part of the system with nobody waiting for it.
+    """
     runner = _task_runner()
     _task_schedules()
     watchers = agent_context().watchers
+    last_state = None
     while True:
         try:
-            await asyncio.to_thread(_pump_schedules)
-            await asyncio.to_thread(watchers.poll_once)
-            task = await asyncio.to_thread(runner.run_once)
+            gov = _governor()
+            pressure = gov.pressure()
+            if pressure.state != last_state:
+                last_state = pressure.state
+                for client in list(CLIENTS):
+                    try:
+                        client.emit(client.queue, "pressure", **pressure.as_dict())
+                    except Exception:
+                        pass
+            if gov.allow_background_work():
+                await asyncio.to_thread(_pump_schedules)
+                await asyncio.to_thread(watchers.poll_once)
+                task = await asyncio.to_thread(runner.run_once)
+            else:
+                task = None
             if task is not None:
                 app.state.last_agent_task = {"id": task.id, "status": task.status}
                 # Emit plan_progress WS event for sub-task completion
@@ -1000,6 +1038,7 @@ def build_app():
             "stage_seconds": round(time.time() - MODELS.stage_started, 1)
                           if MODELS.stage_started else None,
             "voice_ready": MODELS.tts_ready,
+            "pressure": _governor().status(),
             "settings": SETTINGS,
         })
 
@@ -1299,7 +1338,7 @@ def build_app():
 
     def run_whisper(audio: np.ndarray) -> tuple[str, float]:
         t0 = time.time()
-        beam_size = int(SETTINGS.get("stt_beam_size", 5))
+        beam_size = _stt_beam_size()
         segs, _info = MODELS.whisper.transcribe(
             audio,
             beam_size=beam_size,
@@ -1392,8 +1431,9 @@ def build_app():
         for pe in ctx.pending_edits():
             c.emit(q, "edit_confirm", **pe)
         # Deriving durable facts costs a model call; do it after the reply has
-        # been spoken, never in front of it.
-        asyncio.create_task(_learn_about_user(ctx, text))
+        # been spoken, never in front of it — and not under memory pressure.
+        if _governor().allow_post_turn_learning():
+            asyncio.create_task(_learn_about_user(ctx, text))
         c.playback_active = True
         c.barge_frames = 0
         c.barge_candidate.clear()
@@ -1470,7 +1510,8 @@ def build_app():
                 client.queue.put_nowait(text)
             except Exception:
                 continue
-            if alert.severity == "urgent" and client.state == "idle" and not client.muted:
+            if (alert.severity == "urgent" and client.state == "idle"
+                    and not client.muted and _governor().allow_proactive_speech()):
                 try:
                     client.emit(client.queue, "chat", role="assistant",
                                 text=alert.text, engine="proactive")
@@ -1488,6 +1529,11 @@ def build_app():
         await asyncio.sleep(20)  # let startup finish loading before competing
         while True:
             try:
+                if not _governor().allow_background_work():
+                    # low-memory: skip the cycle wholesale; the next one
+                    # re-reads signals and fresh alerts still register late
+                    await asyncio.sleep(interval_s)
+                    continue
                 ctx = agent_context()
                 signals = await asyncio.to_thread(proactive_signals, ctx)
                 for signal in signals:

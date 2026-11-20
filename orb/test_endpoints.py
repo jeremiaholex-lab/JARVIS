@@ -164,6 +164,34 @@ def test_file_watcher_api_is_token_gated_and_controls_configured_watchers(tmp_pa
         server.MODELS.ready = was_ready
 
 
+def test_orb_schedule_pump_enqueues_due_work_once(tmp_path, monkeypatch):
+    from jarvis.agent.schedules import ScheduleStore
+    from jarvis.agent.task_runner import TaskStore
+    from jarvis.agent.tools import _task_schedule
+    import time
+
+    tasks = TaskStore(tmp_path / "tasks.db")
+    monkeypatch.setattr(server, "_TASK_STORE", tasks)
+    monkeypatch.setattr(server, "_SCHEDULE_STORE", None)
+    import jarvis.agent.tools as agent_tools
+    monkeypatch.setattr(agent_tools, "_SCHEDULES", None)
+    schedules = server._task_schedules()
+    assert isinstance(schedules, ScheduleStore)
+    assert json.loads(_task_schedule(action="list"))["schedules"] == []
+
+    schedule = schedules.create("* * * * *", "summarize recent notes")
+    due = time.time() - 120
+    with schedules._connection() as db:
+        db.execute("UPDATE agent_schedules SET next_run_at=? WHERE id=?", (due, schedule.id))
+
+    fired = server._pump_schedules()
+    assert len(fired) == 1
+    assert fired[0]["task"] is not None
+    assert fired[0]["task"].goal.endswith("summarize recent notes")
+    assert server._pump_schedules() == []
+    assert len(tasks.list(limit=20)) == 1
+
+
 def test_tiers_endpoint_is_honest_about_what_the_orb_enforces():
     client, was_ready = _client()
     try:

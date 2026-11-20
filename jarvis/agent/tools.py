@@ -533,7 +533,13 @@ def _check_tier(name: str, fn: Callable[..., str], description: str, parameters:
     return AgentTool(name=name, description=description, parameters=parameters, fn=fn, tier=tier)
 
 
-def build_tools() -> List[AgentTool]:
+def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[AgentTool]:
+    """Build the standard catalog, then validate it and optional READ plugins.
+
+    Extensions are never auto-discovered or imported. Hosts may pass trusted
+    implementations explicitly; the registry requires each extension name to
+    be allowlisted as READ in the deterministic tier policy.
+    """
     tools: List[AgentTool] = []
     projects = _check_tier(
         "jarvis_projects_read",
@@ -907,7 +913,12 @@ def build_tools() -> List[AgentTool]:
         fn=_remember,
         tier=Tier.WRITE,
     ))
-    return tools
+    from jarvis.agent.registry import ToolRegistry
+    registry = ToolRegistry()
+    registry.register_many(tools, builtin=True)
+    if extension_tools:
+        registry.register_many(extension_tools)
+    return registry.list()
 
 
 def tool_schemas(tools: List[AgentTool]) -> List[Dict[str, Any]]:

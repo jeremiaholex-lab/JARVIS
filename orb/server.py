@@ -389,10 +389,11 @@ class AgentContext:
         from jarvis.agent.memory import Memory, shared_memory_path
         from jarvis.agent.tools import build_tools, tool_schemas
         from jarvis.agent.user_model import UserModel
+        from jarvis.agent.plugins import load_plugin_tools
         db = shared_memory_path()
         self.memory = Memory(db)
 
-        self.tools = build_tools()
+        self.tools = build_tools(load_plugin_tools())
         self.schemas = tool_schemas(self.tools)
         from jarvis.agent.tools import configure_vision, configure_writes
         from jarvis.agent.tools import configure_file_edits, configure_user_model, configure_file_watchers
@@ -652,6 +653,8 @@ _TASK_STORE = None
 _TASK_STORE_LOCK = threading.Lock()
 _TASK_RUNNER = None
 _TASK_RUNNER_LOCK = threading.Lock()
+_SCHEDULE_STORE = None
+_SCHEDULE_STORE_LOCK = threading.Lock()
 
 
 def _task_store():
@@ -665,6 +668,34 @@ def _task_store():
                 from jarvis.agent.task_runner import configure_task_store
                 configure_task_store(_TASK_STORE)
     return _TASK_STORE
+
+
+def _task_schedules():
+    """Persistent cron schedules sharing the orb's durable task database."""
+    global _SCHEDULE_STORE
+    if _SCHEDULE_STORE is None:
+        with _SCHEDULE_STORE_LOCK:
+            if _SCHEDULE_STORE is None:
+                from jarvis.agent.schedules import ScheduleStore
+                from jarvis.agent.tools import configure_schedules
+                tasks = _task_store()
+                _SCHEDULE_STORE = ScheduleStore(tasks.db_path, tasks)
+                configure_schedules(_SCHEDULE_STORE)
+    return _SCHEDULE_STORE
+
+
+def _pump_schedules():
+    """Enqueue due schedule slots and log the resulting task IDs."""
+    fired = _task_schedules().check()
+    for record in fired:
+        task = record["task"]
+        _logger.info(
+            "schedule %s due; enqueued task %s (slot %s)",
+            record["schedule_id"][:8],
+            task.id if task else "duplicate-suppressed",
+            time.strftime("%H:%M", time.localtime(record["due_slot"])),
+        )
+    return fired
 
 
 def _task_runner():
@@ -747,9 +778,11 @@ def _process_agent_task(task):
 async def _durable_task_loop(app):
     """Poll bounded read-only tasks and opt-in local filesystem watchers."""
     runner = _task_runner()
+    _task_schedules()
     watchers = agent_context().watchers
     while True:
         try:
+            await asyncio.to_thread(_pump_schedules)
             await asyncio.to_thread(watchers.poll_once)
             task = await asyncio.to_thread(runner.run_once)
             if task is not None:

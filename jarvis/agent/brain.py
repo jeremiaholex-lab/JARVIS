@@ -118,7 +118,8 @@ class Brain:
         from jarvis.agent.tools import configure_file_edits, configure_user_model, configure_file_watchers
         from jarvis.agent.tools import configure_schedules
 
-        self.tools = build_tools()
+        from jarvis.agent.plugins import load_plugin_tools
+        self.tools = build_tools(load_plugin_tools())
         self.schemas = tool_schemas(self.tools)
         # No screen on a chat host: wire a vision context that reports absent,
         # so look_at_screen degrades to a clean error instead of a crash.

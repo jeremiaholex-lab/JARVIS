@@ -37,6 +37,18 @@ _CONFIRMED_TOOL_TIERS: Dict[str, str] = {
     "browser_post": "destructive",
 }
 
+# Plugin on-ramp: tool names a host-loaded extension is allowed to register.
+# Extensions are read-only by construction (registry.py rejects anything the
+# classifier does not call READ), and classify() defaults unknown names to
+# WRITE — so a plugin tool is only registerable while its name is listed
+# here, explicitly, as a READ. Adding a name is a code change in this repo,
+# which is exactly the gate the plugin system is meant to impose: closed for
+# writes, open for reads.
+_EXTENSION_TOOL_NAMES: frozenset[str] = frozenset({
+    "system_info",  # jarvis/plugins/system_info.py — host CPU/memory/disk snapshot
+})
+
+
 # Deletion/destruction markers in a shell command string.
 _DESTRUCTIVE_SHELL = re.compile(
     r"""(?xi)
@@ -107,7 +119,13 @@ def classify(action: PlannedAction) -> Tier:
         # Any shell that is not explicitly a read-only probe is a write.
         return Tier.WRITE
 
-    # 3. Reads are free.
+    # 3. Allowlisted read-only plugin tools: they are registered by hosts
+    #    only after the same classifier calls them READ, so this list is the
+    #    single source of truth for what extensions may add.
+    if tool in _EXTENSION_TOOL_NAMES:
+        return Tier.READ
+
+    # 4. Reads are free.
     if tool in {
         "file_read",
         "file_read_confirmed",

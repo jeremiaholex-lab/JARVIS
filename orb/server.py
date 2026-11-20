@@ -87,12 +87,15 @@ from jarvis.security.file_edit import (
     EDIT_CANCEL_RE,
     EDIT_CONFIRM_RE,
     EDIT_PHRASE_MISPLACED_RE,
+    WRITE_CONFIRM_RE,
 )
 OWW_FRAME = 1280          # 80 ms
 MAX_UTTERANCE_S = 30
 TAIL_S = 1.2              # silence needed to close a VAD segment (relaxed from 0.6 for accented and deliberate speech)
 VAD_POLL_S = 0.8
 WAKE_MODEL = "hey jarvis"
+FOLLOWUP_WINDOW_S = 8.0   # grace: after the reply finishes playing, stay open this long
+FOLLOWUP_MAX_STREAK = 2   # consecutive silent follow-up windows the orb re-arms, then goes idle
 
 # Typed confirmation for a destructive file edit, sent from the chat box:
 # "yes, do it fe_ab12". The grammar (_EDIT_CONFIRM_RE etc.) lives in
@@ -103,6 +106,96 @@ _EDIT_CONFIRM_RE = EDIT_CONFIRM_RE
 _EDIT_CANCEL_RE = EDIT_CANCEL_RE
 _EDIT_BARE_YES_RE = EDIT_BARE_YES_RE
 _EDIT_PHRASE_MISPLACED_RE = EDIT_PHRASE_MISPLACED_RE
+_WRITE_CONFIRM_RE = WRITE_CONFIRM_RE
+
+
+def normalize_spoken_confirmation(text: str) -> str:
+    """STT text -> the shape the confirmation grammar expects.
+
+    Whisper renders hex tokens with spaces ("yes pw ab12cd..."), so compact
+    all whitespace and re-glue the 16-hex character with its `pw_`/`fe_`
+    prefix. Anything that is not a token stays untouched.
+    """
+    compact = " ".join(str(text or "").split())
+    return re.sub(r"\b(pw|fe) ([0-9a-f]{16})\b", r"\1_\2", compact, flags=re.IGNORECASE)
+
+
+def resolve_voice_confirmation(text: str, pending_writes, pending_edits):
+    """Settle a spoken confirmation offline. Pure: no emits, no executor calls.
+
+    Returns one of:
+      {"kind": "write",  "token", "approved"}  -> call resolve_write
+      {"kind": "edit",   "token", "approved", "phrase"} -> call resolve_edit
+      {"kind": "note",   "note"}     -> a system chat line to show instead
+      None                                   -> not a confirmation; run the turn
+    A bare yes/no applies only when exactly one item is pending. Matches are
+    required to name a token that is actually pending, so "yes please" falls
+    through to the model instead of failing as an unknown token.
+    """
+    norm = normalize_spoken_confirmation(text)
+    writes = {w["token"] for w in pending_writes}
+    edits = {e["token"] for e in pending_edits}
+
+    # Edit grammar first: the phrase is destructive-tier and must not be
+    # misread as a write confirmation.
+    confirm = _EDIT_CONFIRM_RE.match(norm)
+    if confirm and confirm.group(2) in edits:
+        return {"kind": "edit", "token": confirm.group(2), "approved": True,
+                "phrase": confirm.group(1)}
+    cancel = _EDIT_CANCEL_RE.match(norm)
+    if cancel and cancel.group(2) in edits:
+        return {"kind": "edit", "token": cancel.group(2), "approved": False, "phrase": ""}
+    misplaced = _EDIT_PHRASE_MISPLACED_RE.match(norm)
+    if misplaced:
+        token = misplaced.group(2)
+        if token in writes:
+            # "yes, do it pw_x": the phrase is for edits, the token is a write.
+            return {"kind": "note", "note": (
+                f"{token} is a pending write, not a file edit. Say "
+                f"'yes {token}' to approve it, or 'no {token}' to cancel it.")}
+        note = (f"{token} is not a file edit token. "
+                "Edits are confirmed with 'yes, do it fe_...'.")
+        return {"kind": "note", "note": note}
+    bare_yes = _EDIT_BARE_YES_RE.match(norm)
+    if bare_yes:
+        # "yes fe_x" alone is not enough for a destructive edit — same offline
+        # answer the typed chat path gives.
+        return {"kind": "note", "note": (
+            f"{bare_yes.group(1)} is a destructive file edit, so 'yes' alone "
+            f"will not apply it. Say '{CONFIRM_PHRASE} {bare_yes.group(1)}' to "
+            "confirm it, or 'no' with the token to cancel.")}
+    write = _WRITE_CONFIRM_RE.match(norm)
+    if write:
+        word, token = write.group(1), write.group(2).lower()
+        if token in writes:
+            return {"kind": "write", "token": token,
+                    "approved": word == "yes"}
+        # A token the resolver re-glued that is not one of ours: answer
+        # offline rather than let the model claim it did something.
+        if re.fullmatch(r"(pw|fe)_[0-9a-f]+", token):
+            return {"kind": "note", "note": (
+                f"{token} is not pending on this orb. Say 'yes' or 'no' with a "
+                "pending token, or tap its card.")}
+
+    # Bare yes/no, only unambiguous when exactly one item is pending.
+    word = norm.lower()
+    if word in ("yes", "no"):
+        if len(writes) + len(edits) != 1:
+            return None
+        if writes:
+            return {"kind": "write", "token": next(iter(writes)),
+                    "approved": word == "yes"}
+        return {"kind": "edit", "token": next(iter(edits)),
+                "approved": word == "yes", "phrase": ""}
+    if word == "cancel":
+        # "cancel" is a confirmation word in the shared grammar, so a bare
+        # spoken cancel is unambiguous only with one item pending too.
+        if len(writes) + len(edits) != 1:
+            return None
+        if writes:
+            return {"kind": "write", "token": next(iter(writes)), "approved": False}
+        return {"kind": "edit", "token": next(iter(edits)), "approved": False, "phrase": ""}
+    return None
 
 SYSTEM_PROMPT = (
     "Your assistant name and identity is JARVIS, a personal voice assistant shown as a floating holo-orb. "
@@ -138,6 +231,8 @@ def default_settings() -> dict:
         "wake_threshold": 0.4,
         "vad_tail_s": 1.2,
         "stt_beam_size": 5,
+        "followup_window_s": FOLLOWUP_WINDOW_S,
+        "followup_max_streak": FOLLOWUP_MAX_STREAK,
         # Context window handed to Ollama. 4096 is deliberate: see
         # AgentContext.call_engine - the framework default of 16384 reserves a
         # ~3 GB KV cache that this machine cannot spare alongside the voice
@@ -600,6 +695,11 @@ class Client:
         self.listening = False
         self.thinking = False
         self.listen_started = 0.0
+        # Follow-up window (roadmap #8): after a reply finishes, the orb stays
+        # open for the next utterance without the wake word. Each window arms
+        # at `listen_started`; `followup_streak` counts the silent re-arms.
+        self.followup_streak = 0
+        self.listen_reason = "wake-word"
         self.last_vad = 0.0
         # Conversation context comes from the persistent store, so a window
         # reload or reconnect does not erase what JARVIS was just told.
@@ -1307,6 +1407,9 @@ def build_app():
             c.emit(q, "tts_done", bytes=total)
             if tts_errors and not total:
                 c.emit(q, "error", message="Voice could not synthesize this reply. The text is still available in chat.")
+            # A spoken reply resets the silent follow-up streak: the next
+            # grace window after it starts fresh, capped again from zero.
+            c.followup_streak = 0
             c.emit(q, "state", state="idle")
         except Exception as exc:
             _logger.exception("TTS response pipeline failed")
@@ -1417,6 +1520,11 @@ def build_app():
         async def start_listening(reason: str) -> None:
             c.listening = True
             c.listen_started = time.time()
+            c.listen_reason = reason
+            if reason != "follow-up":
+                # A fresh wake-word or record-button session starts the silent
+                # streak back at zero.
+                c.followup_streak = 0
             with c.lock:
                 c.buffer = np.zeros(0, dtype=np.float32)
                 c.pcm_ring = np.zeros(0, dtype=np.float32)
@@ -1428,11 +1536,27 @@ def build_app():
                 return
             with c.lock:
                 audio = c.buffer.copy()
-            # timeout: a listening session with no closed segment gives up
-            if time.time() - c.listen_started > MAX_UTTERANCE_S:
+            # timeout: a listening session with no closed segment gives up.
+            # A follow-up window (roadmap #8) uses a short grace period and,
+            # while the silent streak is under the cap, re-arms instead of
+            # going idle — a quiet room must not keep the orb listening
+            # forever, but neither must it yank the floor back to the wake
+            # word mid-conversation.
+            now = time.time()
+            is_followup = c.listen_reason == "follow-up"
+            limit = (float(SETTINGS.get("followup_window_s", FOLLOWUP_WINDOW_S))
+                     if is_followup else MAX_UTTERANCE_S)
+            if now - c.listen_started > limit:
                 c.listening = False
+                cap = int(SETTINGS.get("followup_max_streak", FOLLOWUP_MAX_STREAK))
+                if is_followup and c.followup_streak < cap:
+                    c.followup_streak += 1
+                    await start_listening("follow-up")
+                    return
+                c.followup_streak = 0
                 c.emit(q, "state", state="idle")
-                c.emit(q, "error", message="Didn't catch a question — try again, or type below")
+                if not is_followup:
+                    c.emit(q, "error", message="Didn't catch a question — try again, or type below")
                 return
             if audio is None or audio.size < SAMPLE_RATE:
                 return
@@ -1448,6 +1572,9 @@ def build_app():
                 return
             c.listening = False
             c.thinking = True
+            # Speech actually landed in this window: the silent re-arms are
+            # broken, so the follow-up streak restarts from zero.
+            c.followup_streak = 0
             pad_lead = int(0.25 * SAMPLE_RATE)
             pad_trail = int(0.30 * SAMPLE_RATE)
             start_idx = max(0, int(segs[0]["start"]) - pad_lead)
@@ -1466,6 +1593,22 @@ def build_app():
                 c.emit(q, "error", message="could not understand that — try again")
                 return
             c.emit(q, "chat", role="user", text=text, engine="whisper")
+            # Roadmap #8: a spoken confirmation is settled offline, exactly
+            # like the typed one — the phrase never reaches the model.
+            verdict = resolve_voice_confirmation(
+                text, agent_context().pending_writes(),
+                agent_context().pending_edits())
+            if verdict is not None:
+                await settle_confirmation(c, q, verdict, user_text=text)
+                c.thinking = False
+                if c.watchdog:
+                    c.watchdog.cancel()
+                c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
+                # The floor just changed (or the user mis-spoke and needs to
+                # retry): re-open a follow-up window so the conversation keeps
+                # flowing without the wake word. The streak cap still bounds it.
+                await start_listening("follow-up")
+                return
             await do_turn(c, q, text, trace, force_cloud=False)
             c.thinking = False
             if c.watchdog:
@@ -1484,6 +1627,54 @@ def build_app():
             if cc.state in ("thinking", "speaking"):
                 cc.thinking = False
                 cc.emit(qq, "state", state="idle")
+
+        async def settle_confirmation(c, q, verdict: dict, user_text: str = "") -> bool:
+            """Run one offline confirmation verdict: executor call + the same
+            UI emits the typed path uses, so a voice settlement is
+            indistinguishable from a tap. `user_text`, when given, is the
+            confirmation line itself (typed or voiced) and is paired in history
+            with the result note — a user turn with nothing after it reads as
+            if JARVIS ignored them. Returns True when the words actually
+            applied or cancelled something."""
+            kind = verdict["kind"]
+            if kind == "note":
+                if user_text:
+                    c.remember("user", user_text)
+                c.remember("assistant", verdict["note"], "edits")
+                c.emit(q, "chat", role="system", text=verdict["note"], engine="edits")
+                return False
+            token = verdict["token"]
+            if kind == "write":
+                result = await asyncio.to_thread(
+                    agent_context().resolve_write, token, verdict["approved"])
+                c.emit(q, "write_resolved", token=token, approved=verdict["approved"],
+                       outcome=result)
+                if result.get("error"):
+                    note = f"Write not done: {result['error']}"
+                elif not verdict["approved"]:
+                    note = "Write cancelled."
+                else:
+                    note = "Write saved to your projects."
+                c.emit(q, "chat", role="system", text=note, engine="writes")
+            else:  # edit
+                result = await asyncio.to_thread(
+                    agent_context().resolve_edit, token, verdict["approved"],
+                    verdict.get("phrase", ""))
+                c.emit(q, "edit_resolved", token=token, approved=verdict["approved"],
+                       outcome=result)
+                if result.get("error"):
+                    note = f"Edit not applied: {result['error']}"
+                elif not verdict["approved"]:
+                    note = "Edit cancelled."
+                else:
+                    oc = result.get("outcome") or {}
+                    note = (f"Edited {oc.get('path', 'the file')} "
+                            f"(+{oc.get('added', 0)} -{oc.get('removed', 0)}).")
+                c.emit(q, "chat", role="system", text=note, engine="edits")
+            if user_text:
+                c.remember("user", user_text)
+            c.remember("assistant", note, "writes" if kind == "write" else "edits")
+            return not result.get("error")
 
         async def handle_audio_chunk(chunk: bytes) -> None:
             if c.muted:
@@ -1576,9 +1767,8 @@ def build_app():
                             f"'yes' alone will not apply it. Type "
                             f"'{CONFIRM_PHRASE} {token}' to confirm "
                             f"it, or 'no {token}' to cancel.")
-                    c.remember("user", text)
-                    c.remember("assistant", note, "edits")
-                    c.emit(q, "chat", role="system", text=note, engine="edits")
+                    await settle_confirmation(c, q, {"kind": "note", "note": note},
+                                               user_text=text)
                     continue
                 if edit_confirm or edit_cancel:
                     confirmed = bool(edit_confirm)
@@ -1588,34 +1778,16 @@ def build_app():
                     # confirmation would otherwise apply the edit and then fail
                     # to find its own card, leaving it on screen forever.
                     token = (edit_confirm or edit_cancel).group(2).lower()
-                    result = await asyncio.to_thread(
-                        agent_context().resolve_edit, token, confirmed, phrase)
-                    if result.get("error"):
-                        note = f"Edit not applied: {result['error']}"
-                    elif not confirmed:
-                        note = "Edit cancelled."
-                    else:
-                        oc = result.get("outcome") or {}
-                        note = (f"Edited {oc.get('path', 'the file')} "
-                                f"(+{oc.get('added', 0)} -{oc.get('removed', 0)}).")
-                    c.remember("user", text)
-                    # Pair it with the reply, or the history keeps a user turn
-                    # with nothing after it and reads as if JARVIS ignored them.
-                    c.remember("assistant", note, "edits")
-                    c.emit(q, "edit_resolved", token=token, approved=confirmed,
-                           outcome=result)
-                    c.emit(q, "chat", role="system", text=note, engine="edits")
+                    verdict = {"kind": "edit", "token": token,
+                               "approved": confirmed, "phrase": phrase}
+                    await settle_confirmation(c, q, verdict, user_text=text)
                     continue
                 misplaced = _EDIT_PHRASE_MISPLACED_RE.match(text)
                 if misplaced:
-                    # "yes, do it pw_x": the phrase is for edits, but the token
-                    # is not one. Answer offline so the model cannot claim it
-                    # applied something. The Telegram host does the same.
                     note = (f"{misplaced.group(2)} is not a file edit token. "
                             "Edits are confirmed with 'yes, do it fe_…'.")
-                    c.remember("user", text)
-                    c.remember("assistant", note, "edits")
-                    c.emit(q, "chat", role="system", text=note, engine="edits")
+                    await settle_confirmation(c, q, {"kind": "note", "note": note},
+                                              user_text=text)
                     continue
                 c.thinking = True
                 c.emit(q, "state", state="thinking")
@@ -1675,8 +1847,15 @@ def build_app():
                 if c.watchdog:
                     c.watchdog.cancel()
                     c.watchdog = None
-                if not c.listening:
-                    c.emit(q, "state", state="idle")
+                # Roadmap #8: the reply finished playing — stay open for the
+                # next utterance without the wake word. The window is short
+                # and the silent re-arms inside it are capped, so a quiet
+                # room goes idle instead of listening forever.
+                if c.muted:
+                    if not c.listening:
+                        c.emit(q, "state", state="idle")
+                else:
+                    await start_listening("follow-up")
             elif op == "mute":
                 c.muted = bool(msg.get("on"))
                 c.listening = False
@@ -1685,7 +1864,9 @@ def build_app():
                     c.pcm_ring = np.zeros(0, dtype=np.float32)
                 c.emit(q, "state", state="muted" if c.muted else "idle")
             elif op == "settings":
-                for k in ("local_model", "voice", "wake_threshold", "vad_tail_s", "stt_beam_size", "tiers", "cloud", "vision"):
+                for k in ("local_model", "voice", "wake_threshold", "vad_tail_s", "stt_beam_size",
+                          "followup_window_s", "followup_max_streak",
+                          "tiers", "cloud", "vision"):
                     if k in msg:
                         SETTINGS[k] = msg[k]
                 SETTINGS_PATH.write_text(json.dumps(SETTINGS, indent=2))

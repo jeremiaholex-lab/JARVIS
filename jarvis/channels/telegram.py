@@ -166,7 +166,12 @@ class TelegramBot:
 
         text = text.strip()
         if text == "/reset":
-            self._history.pop(chat_id, None)
+            # Store an empty list (not a pop): this chat is explicitly
+            # cleared, so the next message must NOT re-seed from shared
+            # episodes — /reset means "start blank." A chat that was never
+            # used (no key at all) is a different case: it seeds, so
+            # cross-channel conversations carry over.
+            self._history[chat_id] = []
             self._save_history()
             self.send(chat_id, "Memory for this chat cleared.")
             return None
@@ -220,6 +225,20 @@ class TelegramBot:
             pass  # cosmetic only
 
         memory = self._history.get(chat_id, [])
+        if chat_id not in self._history:
+            # First time this chat is used here: pull the recent few shared
+            # episodes so a conversation started on another channel (the orb)
+            # continues instead of starting from zero. Capped to the last few
+            # turns; the full transcript stays in the shared store.
+            seed = []
+            episodic = getattr(getattr(self.brain, "memory", None), "recent_turns", None)
+            if callable(episodic):
+                try:
+                    seed = [{"role": t.role, "content": t.content[:300]}
+                            for t in episodic(limit=_HISTORY_TURNS)]
+                except Exception:
+                    _logger.warning("seeding chat history from shared memory failed")
+            memory = seed
         try:
             result = self.brain.run(text, memory=memory, force_cloud=force_cloud)
         except Exception as exc:

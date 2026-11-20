@@ -33,3 +33,8 @@ orb_shell.err
 orb_shell.out
 kokoro_test.wav
 .telegram-history.json
+
+# tracked-by-accident shell logs and test audio
+orb/backend.log
+orb/backend.err.log
+orb/*.wav

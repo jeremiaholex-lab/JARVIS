@@ -24,9 +24,15 @@ from .routing import (LOW_CONFIDENCE, Route, _ascii_text, needs_retry,
 _logger = logging.getLogger(__name__)
 
 TOOL_GUIDANCE = (
+    "You may manage local file watchers with jarvis_file_watch only when explicitly requested. "
+    "Watchers are opt-in, limited to approved folders, and enqueue read-only tasks after matching "
+    "files change; they do not modify files or send data to external services. "
     "For explicitly requested background work, you may queue a task with jarvis_task_enqueue "
     "and check progress with jarvis_task_status. "
     "For multi-step goals, use jarvis_plan_and_enqueue to decompose into dependent sub-tasks. "
+    "For work that must repeat on a schedule ('every Monday 9am ...'), create a cron "
+    "schedule with jarvis_task_schedule: it re-queues the same read-only task on time; "
+    "missed slots run late once instead of backfilling. "
     "Background tasks use read-only tools; do not promise unattended writes or external actions. "
     "You have read-only tools for the user's own data: their projects and "
     "deadlines, their indexed documents, read-only Google mail/calendar/task data, "

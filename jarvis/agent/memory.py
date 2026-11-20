@@ -9,10 +9,14 @@ Two of the design's three memory tiers, in one local SQLite file:
               the client deadline is Friday"), written deliberately rather
               than by appending every message.
 
-Nothing here syncs anywhere; the file lives under the JARVIS runtime home.
+Every JARVIS host (the orb, the Telegram bot, scripts) resolves to the ONE
+file below through :func:`shared_memory_path`, so a conversation on any
+channel is visible to every channel on its next turn. No sync layer: the
+SQLite file is the shared state.
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import time
@@ -20,6 +24,22 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+JARVIS_ROOT = Path(__file__).resolve().parents[2]
+
+
+def shared_memory_path() -> Path:
+    """The single memory.db every JARVIS host reads and writes.
+
+    Resolution is deliberately plain: ``$OPENJARVIS_HOME`` when set, else
+    ``JARVIS/.openjarvis``. The orb's old ``governance_home()`` heuristic
+    (env home only when it held a skill-governance ledger) silently split
+    the file from Brain's the moment the env var pointed elsewhere — hosts
+    that share memory must use this one function, and leave
+    ``governance_home()`` for the ledger and audit state.
+    """
+    home = os.environ.get("OPENJARVIS_HOME") or str(JARVIS_ROOT / ".openjarvis")
+    return Path(home) / "memory.db"
 
 # Only a statement that *starts* with "remember" is an instruction to keep a
 # fact. "do you remember that we shipped?" is a question, not a fact.
@@ -138,4 +158,4 @@ class Memory:
         return {"episodes": episodes, "facts": facts, "db": str(self.db_path)}
 
 
-__all__ = ["Memory", "Turn"]
+__all__ = ["Memory", "Turn", "shared_memory_path"]

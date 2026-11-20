@@ -133,6 +133,37 @@ def test_plan_id_filter_returns_root_and_subtasks():
         server.MODELS.ready = was_ready
 
 
+def test_file_watcher_api_is_token_gated_and_controls_configured_watchers(tmp_path):
+    client, was_ready = _client()
+    try:
+        headers = {"x-jarvis-task-token": client.app.state.task_api_token}
+        manager = server.agent_context().watchers
+        original_roots = manager.approved_roots
+        manager.approved_roots = (*original_roots, tmp_path.resolve())
+        watched = tmp_path / "watch-me"
+        watched.mkdir()
+        with client:
+            assert client.get("/api/watchers").status_code == 403
+            created = client.post("/api/watchers", headers=headers, json={
+                "root": str(watched), "pattern": "**/*.md",
+                "task_instruction": "Summarize changed notes",
+            })
+            assert created.status_code == 201, created.text
+            watcher = created.json()["watcher"]
+            assert watcher["enabled"] is True
+            assert "Existing matching files" in watcher["baseline"]
+            assert client.post(f"/api/watchers/{watcher['id']}/pause", headers=headers).json()["enabled"] is False
+            assert client.post(f"/api/watchers/{watcher['id']}/resume", headers=headers).json()["enabled"] is True
+            assert client.post(f"/api/watchers/{watcher['id']}/remove", headers=headers).json()["removed"] is True
+            outside = tmp_path.parent / "not-approved"
+            outside.mkdir(exist_ok=True)
+            rejected = client.post("/api/watchers", headers=headers, json={"root": str(outside)})
+            assert rejected.status_code == 400
+    finally:
+        manager.approved_roots = original_roots
+        server.MODELS.ready = was_ready
+
+
 def test_tiers_endpoint_is_honest_about_what_the_orb_enforces():
     client, was_ready = _client()
     try:

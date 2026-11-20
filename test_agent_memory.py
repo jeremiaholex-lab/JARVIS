@@ -1,4 +1,4 @@
-from jarvis.agent.memory import Memory
+from jarvis.agent.memory import Memory, shared_memory_path
 
 
 def test_episodes_survive_a_reopen(tmp_path):
@@ -36,3 +36,19 @@ def test_blank_and_bad_roles_are_ignored(tmp_path):
     m.remember_turn("user", "")
     m.remember_turn("system", "not allowed")
     assert m.recent_turns() == []
+
+
+def test_resolver_tracks_env_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENJARVIS_HOME", str(tmp_path))
+    assert shared_memory_path() == tmp_path / "memory.db"
+
+
+def test_resolver_defaults_to_jarvis_home(monkeypatch):
+    monkeypatch.delenv("OPENJARVIS_HOME", raising=False)
+    p = shared_memory_path()
+    assert p.name == "memory.db" and p.parent.name == ".openjarvis"
+
+
+def test_empty_env_home_falls_back(monkeypatch):
+    monkeypatch.setenv("OPENJARVIS_HOME", "")
+    assert shared_memory_path().parent.name == ".openjarvis"

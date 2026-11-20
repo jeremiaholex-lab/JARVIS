@@ -21,7 +21,9 @@ from typing import Callable, Optional
 STATUSES = {"queued", "running", "waiting_confirmation", "completed", "failed", "cancelled"}
 TERMINAL = {"completed", "failed", "cancelled"}
 _ALLOWED_TRANSITIONS = {
-    "queued": {"running", "cancelled", "completed"},
+    # "failed" is reachable from queued so a plan root can be settled when a
+    # sub-task it depends on fails before the root is ever claimed.
+    "queued": {"running", "cancelled", "completed", "failed"},
     "running": {"queued", "waiting_confirmation", "completed", "failed", "cancelled"},
     "waiting_confirmation": {"queued", "cancelled"},
     "failed": {"queued", "cancelled"},
@@ -47,6 +49,8 @@ class AgentTask:
     step_index: int = -1
     depends_on: list[str] = field(default_factory=list)
     is_plan_root: bool = False
+    role: str = ""
+    watch_root: str = ""
 
 
 @dataclass(slots=True)
@@ -96,7 +100,9 @@ class TaskStore:
                     plan_id TEXT NOT NULL DEFAULT '',
                     step_index INTEGER NOT NULL DEFAULT -1,
                     depends_on TEXT NOT NULL DEFAULT '[]',
-                    is_plan_root INTEGER NOT NULL DEFAULT 0
+                    is_plan_root INTEGER NOT NULL DEFAULT 0,
+                    role TEXT NOT NULL DEFAULT '',
+                    watch_root TEXT NOT NULL DEFAULT ''
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS agent_tasks_idempotency
                     ON agent_tasks(idempotency_key) WHERE idempotency_key <> '';
@@ -126,6 +132,10 @@ class TaskStore:
             db.execute("ALTER TABLE agent_tasks ADD COLUMN depends_on TEXT DEFAULT '[]'")
         if "is_plan_root" not in cols:
             db.execute("ALTER TABLE agent_tasks ADD COLUMN is_plan_root INTEGER DEFAULT 0")
+        if "role" not in cols:
+            db.execute("ALTER TABLE agent_tasks ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+        if "watch_root" not in cols:
+            db.execute("ALTER TABLE agent_tasks ADD COLUMN watch_root TEXT NOT NULL DEFAULT ''")
         # Index may not exist in old schemas
         idxs = {r[1] for r in db.execute("PRAGMA index_list(agent_tasks)").fetchall()}
         if "agent_tasks_plan" not in idxs:
@@ -158,6 +168,7 @@ class TaskStore:
             result=row["result"], error=row["error"], idempotency_key=row["idempotency_key"],
             plan_id=row["plan_id"], step_index=row["step_index"],
             depends_on=depends_on, is_plan_root=bool(row["is_plan_root"]),
+            role=row["role"] or "", watch_root=row["watch_root"] or "",
         )
 
     def _event(self, db, task_id: str, event: str, detail: dict | None = None) -> None:
@@ -166,7 +177,7 @@ class TaskStore:
             (task_id, time.time(), event, json.dumps(detail or {}, ensure_ascii=False)),
         )
 
-    def create(self, goal: str, *, idempotency_key: str = "") -> AgentTask:
+    def create(self, goal: str, *, idempotency_key: str = "", role: str = "", watch_root: str = "") -> AgentTask:
         goal = str(goal or "").strip()
         if not goal:
             raise ValueError("task goal must not be empty")
@@ -182,9 +193,9 @@ class TaskStore:
                 if existing:
                     return self._decode(existing)
             db.execute(
-                "INSERT INTO agent_tasks(id,goal,status,created_at,updated_at,idempotency_key) "
-                "VALUES(?,?,'queued',?,?,?)",
-                (task_id, goal, now, now, idempotency_key),
+                "INSERT INTO agent_tasks(id,goal,status,created_at,updated_at,idempotency_key,role,watch_root) "
+                "VALUES(?,?,'queued',?,?,?,?,?)",
+                (task_id, goal, now, now, idempotency_key, role, watch_root),
             )
             self._event(db, task_id, "queued", {"goal": goal})
             row = db.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
@@ -235,10 +246,14 @@ class TaskStore:
             if row is None:
                 return None
             now = time.time()
-            db.execute(
+            cur = db.execute(
                 "UPDATE agent_tasks SET status='running', attempts=attempts+1, updated_at=? WHERE id=? AND status='queued'",
                 (now, row["id"]),
             )
+            if not cur.rowcount:
+                # Another process claimed this row between our SELECT and
+                # UPDATE. Do not report a claim we did not win.
+                return None
             self._event(db, row["id"], "started", {"attempt": row["attempts"] + 1})
             claimed = db.execute("SELECT * FROM agent_tasks WHERE id=?", (row["id"],)).fetchone()
         return self._decode(claimed)
@@ -350,42 +365,45 @@ class TaskStore:
         plan_id = root_id  # plan_id equals root task id
 
         with self._lock, self._connection() as db:
-            # Create root task
+            # Create root task. The root depends on every sub-task, so the
+            # runner can never claim it early: it settles only once all
+            # sub-tasks are terminal, via check_plan_completion.
             root_idempotency = f"{plan.idempotency_key}:root" if plan.idempotency_key else ""
-            db.execute(
-                """INSERT INTO agent_tasks(id,goal,status,created_at,updated_at,idempotency_key,
-                   plan_id,step_index,depends_on,is_plan_root)
-                   VALUES(?,?,'queued',?,?,?,?,?,'[]',1)""",
-                (root_id, plan.root_goal, now, now, root_idempotency, plan_id, -1),
-            )
-            self._event(db, root_id, "queued", {"goal": plan.root_goal, "is_plan_root": True})
 
-            # First pass: create sub-tasks with empty depends_on, collect IDs
+            # First pass: allocate sub-task ids so the root can depend on them.
             index_to_id = {}
             subtasks_info = []
+            subtasks: list[AgentTask] = []
             for i, step in enumerate(plan.steps):
                 task_id = uuid.uuid4().hex
                 step_idempotency = f"{plan.idempotency_key}:step:{i}" if plan.idempotency_key else ""
                 index_to_id[step.index] = task_id
                 subtasks_info.append((task_id, step, step_idempotency))
 
-            # Second pass: update depends_on with actual task IDs
+            root_depends_on = json.dumps([task_id for task_id, _, _ in subtasks_info])
+            db.execute(
+                """INSERT INTO agent_tasks(id,goal,status,created_at,updated_at,idempotency_key,
+                   plan_id,step_index,depends_on,is_plan_root)
+                   VALUES(?,?,'queued',?,?,?,?,?,?,1)""",
+                (root_id, plan.root_goal, now, now, root_idempotency, plan_id, -1, root_depends_on),
+            )
+            self._event(db, root_id, "queued", {"goal": plan.root_goal, "is_plan_root": True})
+
+            # Second pass: insert sub-tasks with resolved dependency ids.
             for task_id, step, step_idempotency in subtasks_info:
                 depends_on_ids = [index_to_id[dep_idx] for dep_idx in step.depends_on]
                 depends_on_json = json.dumps(depends_on_ids)
 
                 db.execute(
                     """INSERT INTO agent_tasks(id,goal,status,created_at,updated_at,idempotency_key,
-                       plan_id,step_index,depends_on,is_plan_root)
-                       VALUES(?,?,'queued',?,?,?,?,?,?,0)""",
-                    (task_id, step.goal, now, now, step_idempotency, plan_id, step.index, depends_on_json),
+                       plan_id,step_index,depends_on,is_plan_root,role)
+                       VALUES(?,?,'queued',?,?,?,?,?,?,0,?)""",
+                    (task_id, step.goal, now, now, step_idempotency, plan_id, step.index,
+                     depends_on_json, getattr(step, "role", "") or ""),
                 )
-                self._event(db, task_id, "queued", {"goal": step.goal, "step_index": step.index, "depends_on": depends_on_ids})
-
-            # Build subtasks list with resolved IDs
-            subtasks: list[AgentTask] = []
-            for task_id, step, step_idempotency in subtasks_info:
-                depends_on_ids = [index_to_id[dep_idx] for dep_idx in step.depends_on]
+                self._event(db, task_id, "queued", {"goal": step.goal, "step_index": step.index,
+                                                    "depends_on": depends_on_ids,
+                                                    "role": getattr(step, "role", "")})
                 subtasks.append(AgentTask(
                     id=task_id, goal=step.goal, status="queued",
                     created_at=now, updated_at=now, attempts=0, steps=0,
@@ -393,6 +411,7 @@ class TaskStore:
                     idempotency_key=step_idempotency,
                     plan_id=plan_id, step_index=step.index,
                     depends_on=depends_on_ids, is_plan_root=False,
+                    role=getattr(step, "role", "") or "",
                 ))
 
             # Return root task
@@ -409,19 +428,27 @@ class TaskStore:
             ).fetchall()
         return [self._decode(r) for r in rows]
 
+    def get_plan_root_by_key(self, idempotency_key: str) -> AgentTask | None:
+        """Look up a plan root by its idempotency key (used to dedupe enqueues)."""
+        if not idempotency_key:
+            return None
+        with self._lock, self._connection() as db:
+            row = db.execute(
+                "SELECT * FROM agent_tasks WHERE idempotency_key=? AND is_plan_root=1",
+                (idempotency_key,),
+            ).fetchone()
+        return self._decode(row)
+
     def mark_deps_completed(self, completed_task_id: str) -> list[AgentTask]:
-        """Find tasks waiting on completed_task_id and re-queue them if all deps met."""
-        # First, get the completed task to find its plan_id
+        """Return tasks in the same plan whose dependencies are now all met."""
         completed = self.get(completed_task_id)
         if completed is None or not completed.plan_id:
             return []
 
         plan_id = completed.plan_id
-        now = time.time()
         ready: list[AgentTask] = []
 
         with self._lock, self._connection() as db:
-            # Find queued tasks in the same plan that depend on completed_task_id
             rows = db.execute(
                 """SELECT * FROM agent_tasks
                    WHERE plan_id=? AND status='queued'
@@ -436,51 +463,106 @@ class TaskStore:
 
             for row in rows:
                 task = self._decode(row)
-                # Check if ALL dependencies are completed
-                all_deps_completed = True
-                for dep_id in task.depends_on:
-                    dep_task = self.get(dep_id)
-                    if dep_task is None or dep_task.status != "completed":
-                        all_deps_completed = False
-                        break
-
-                if all_deps_completed:
-                    # Task is already queued, just ensure it's claimable (it already is)
-                    # We return it as "ready" - no state change needed
+                if not task.depends_on:
+                    continue
+                # Every dependency must exist and be completed. A missing
+                # dependency is not "satisfied" — counting only unmet rows
+                # would silently treat a dangling id as done.
+                marks = ",".join("?" for _ in task.depends_on)
+                args = tuple(task.depends_on)
+                found = db.execute(
+                    f"SELECT COUNT(*) FROM agent_tasks WHERE id IN ({marks})", args
+                ).fetchone()[0]
+                done = db.execute(
+                    f"SELECT COUNT(*) FROM agent_tasks WHERE id IN ({marks}) AND status='completed'",
+                    args,
+                ).fetchone()[0]
+                if found == len(task.depends_on) and done == len(task.depends_on):
                     ready.append(task)
 
-        # Trigger plan completion check
         self.check_plan_completion(plan_id)
         return ready
 
+    def settle_plan_after_failure(self, failed_task_id: str) -> AgentTask | None:
+        """Fail the dependents of a failed sub-task, then settle the plan.
+
+        A dependent can never run once a prerequisite has failed, so leaving it
+        queued would strand the plan forever with no claimable work. Transitive
+        dependents are failed too, then the root is settled.
+        """
+        failed = self.get(failed_task_id)
+        if failed is None or not failed.plan_id:
+            return None
+        plan_id = failed.plan_id
+        now = time.time()
+
+        frontier = [failed_task_id]
+        while frontier:
+            current = frontier.pop()
+            with self._lock, self._connection() as db:
+                rows = db.execute(
+                    """SELECT * FROM agent_tasks
+                       WHERE plan_id=? AND status='queued' AND is_plan_root=0
+                       AND depends_on != '[]' AND depends_on IS NOT NULL""",
+                    (plan_id,),
+                ).fetchall()
+                newly_blocked: list[str] = []
+                for row in rows:
+                    task = self._decode(row)
+                    if current not in task.depends_on:
+                        continue
+                    db.execute(
+                        "UPDATE agent_tasks SET status='failed', error=?, updated_at=? "
+                        "WHERE id=? AND status='queued'",
+                        (f"blocked: prerequisite {current} failed", now, task.id),
+                    )
+                    self._event(db, task.id, "failed", {"blocked_by": current})
+                    newly_blocked.append(task.id)
+            frontier.extend(newly_blocked)
+
+        return self.check_plan_completion(plan_id)
+
     def check_plan_completion(self, plan_id: str) -> AgentTask | None:
-        """If all sub-tasks completed, mark root completed with aggregated results."""
+        """Settle the plan root once every sub-task has reached a terminal state.
+
+        Idempotent: a root that is already terminal is returned unchanged, so a
+        late sub-task completion cannot raise on it. ``cancelled`` sub-tasks
+        count as settled — they are a deliberate end state, not a pending one.
+        """
         with self._lock, self._connection() as db:
-            root = db.execute("SELECT * FROM agent_tasks WHERE plan_id=? AND is_plan_root=1", (plan_id,)).fetchone()
+            root = db.execute(
+                "SELECT * FROM agent_tasks WHERE plan_id=? AND is_plan_root=1", (plan_id,)
+            ).fetchone()
             if not root:
                 return None
+            if root["status"] in TERMINAL:
+                return self._decode(root)
 
-            # Count sub-tasks
-            total = db.execute("SELECT COUNT(*) FROM agent_tasks WHERE plan_id=? AND is_plan_root=0", (plan_id,)).fetchone()[0]
-            done = db.execute("SELECT COUNT(*) FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='completed'", (plan_id,)).fetchone()[0]
-            failed = db.execute("SELECT COUNT(*) FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='failed'", (plan_id,)).fetchone()[0]
+            rows = db.execute(
+                "SELECT status, result, error FROM agent_tasks "
+                "WHERE plan_id=? AND is_plan_root=0",
+                (plan_id,),
+            ).fetchall()
+            if not rows:
+                return None
+            if any(r["status"] not in TERMINAL for r in rows):
+                return None
 
-            if done + failed == total and total > 0:
-                if failed > 0:
-                    # Aggregate errors
-                    errors = [r["error"] for r in db.execute(
-                        "SELECT error FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='failed'", (plan_id,)
-                    ).fetchall()]
-                    agg_error = f"{failed} sub-task(s) failed: " + "; ".join(errors[:3])
-                    return self.transition(root["id"], "failed", error=agg_error)
-                else:
-                    # Aggregate results
-                    results = [r["result"] for r in db.execute(
-                        "SELECT result FROM agent_tasks WHERE plan_id=? AND is_plan_root=0 AND status='completed'", (plan_id,)
-                    ).fetchall()]
-                    agg_result = "Plan completed. " + " | ".join(results[:5])
-                    return self.transition(root["id"], "completed", result=agg_result)
-        return None
+            failed = [r for r in rows if r["status"] == "failed"]
+            cancelled = [r for r in rows if r["status"] == "cancelled"]
+            completed = [r for r in rows if r["status"] == "completed"]
+
+        if failed or cancelled:
+            parts: list[str] = []
+            if failed:
+                detail = "; ".join((r["error"] or "unknown error") for r in failed[:3])
+                parts.append(f"{len(failed)} sub-task(s) failed: {detail}")
+            if cancelled:
+                parts.append(f"{len(cancelled)} sub-task(s) cancelled")
+            return self.transition(root["id"], "failed", error="; ".join(parts))
+
+        agg_result = "Plan completed. " + " | ".join((r["result"] or "") for r in completed[:5])
+        return self.transition(root["id"], "completed", result=agg_result)
 
 
 class DurableTaskRunner:
@@ -545,21 +627,27 @@ class DurableTaskRunner:
                     # Python cannot safely stop a running processor thread.
                     # Keep it failed and block manual retries until it exits.
                     self._timed_out_steps.add(task.id)
-                    return self.store.transition(
+                    timed_out = self.store.transition(
                         task.id, "failed",
                         error=f"TimeoutError: task step exceeded {self.timeout_seconds:g}s; worker continues in background",
                     )
+                    self.store.settle_plan_after_failure(task.id)
+                    return timed_out
             if error_box:
                 err = error_box[0]
                 if task.attempts < self.max_attempts:
                     return self.store.transition(task.id, "queued", error=f"{type(err).__name__}: {err}")
-                return self.store.transition(task.id, "failed", error=f"{type(err).__name__}: {err}")
+                failed = self.store.transition(task.id, "failed", error=f"{type(err).__name__}: {err}")
+                self.store.settle_plan_after_failure(task.id)
+                return failed
             result = result_box[0]
             self.store.save_step(task.id, checkpoint=result.checkpoint, result=result.result)
             if result.error:
                 if task.attempts < self.max_attempts:
                     return self.store.transition(task.id, "queued", error=result.error)
-                return self.store.transition(task.id, "failed", error=result.error)
+                failed = self.store.transition(task.id, "failed", error=result.error)
+                self.store.settle_plan_after_failure(task.id)
+                return failed
             if result.waiting_confirmation:
                 return self.store.transition(task.id, "waiting_confirmation", result=result.result)
             if result.done:
@@ -568,7 +656,9 @@ class DurableTaskRunner:
                 return completed
             updated = self.store.get(task.id)
             if updated and updated.steps >= self.max_steps:
-                return self.store.transition(task.id, "failed", error="maximum step limit reached")
+                failed = self.store.transition(task.id, "failed", error="maximum step limit reached")
+                self.store.settle_plan_after_failure(task.id)
+                return failed
             return self.store.transition(task.id, "queued", result=result.result)
         finally:
             if worker is None or not worker.is_alive():

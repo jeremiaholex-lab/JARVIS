@@ -15,6 +15,7 @@ class PlanStep:
     depends_on: list[int] = field(default_factory=list)
     max_steps: int = 4
     max_attempts: int = 2
+    role: str = "general"
 
 
 @dataclass(slots=True)
@@ -26,21 +27,29 @@ class Plan:
 
 PLANNER_PROMPT = """Decompose the user's goal into a sequence of bounded sub-tasks.
 Each sub-task must be completable with read-only tools in at most 4 steps.
-Return JSON only: {{"steps": [{{"index": 0, "goal": "...", "depends_on": []}}, ...]}}
+Return JSON only: {{"steps": [{{"index": 0, "goal": "...", "depends_on": [], "role": "researcher"}}, ...]}}
 - Max {max_subtasks} steps
 - depends_on contains indices of prerequisite steps (must form a DAG)
 - No circular dependencies
 - Steps execute sequentially in topological order
+- role picks which specialist runs the step, one of:
+{roles}
+  Use "researcher" to find and cite facts, "coder" to compute or parse with
+  sandboxed Python, "reviewer" to check work already done, "general" when no
+  specialist fits. A reviewer step should depend on the step it reviews.
 Goal: {goal}"""
 
 
-def decompose_goal(goal: str, max_subtasks: int, call_engine: Callable) -> Plan:
+def decompose_goal(goal: str, max_subtasks: int, call_engine: Callable,
+                   idempotency_key: str = "") -> Plan:
     """Decompose a goal into a validated Plan of sub-tasks.
 
     Args:
         goal: The user's high-level goal to decompose.
         max_subtasks: Maximum number of sub-tasks (1-10, default 5).
         call_engine: Callable(engine: str, msgs: list[dict], tools: list[dict] | None) -> dict
+        idempotency_key: Optional request id, carried onto the Plan so the
+            store can dedupe a repeated enqueue.
 
     Returns:
         Plan with validated steps forming a DAG.
@@ -52,7 +61,12 @@ def decompose_goal(goal: str, max_subtasks: int, call_engine: Callable) -> Plan:
     if not isinstance(max_subtasks, int) or max_subtasks < 1 or max_subtasks > 10:
         raise ValueError("max_subtasks must be an integer between 1 and 10")
 
-    prompt = PLANNER_PROMPT.format(goal=goal, max_subtasks=max_subtasks)
+    from .roles import normalise_role, role_names
+
+    role_lines = "\n".join(
+        f'  - "{name}": {get_role_description(name)}' for name in role_names()
+    )
+    prompt = PLANNER_PROMPT.format(goal=goal, max_subtasks=max_subtasks, roles=role_lines)
 
     response = call_engine("local", [{"role": "user", "content": prompt}], tools=None)
 
@@ -98,10 +112,16 @@ def decompose_goal(goal: str, max_subtasks: int, call_engine: Callable) -> Plan:
         if not isinstance(depends_on, list) or not all(isinstance(d, int) for d in depends_on):
             raise ValueError(f"Step {index} 'depends_on' must be a list of integers")
 
+        # An unknown or missing role degrades to "general" rather than failing
+        # the plan: a hallucinated role should cost a worse tool set, not the
+        # whole task.
+        role = normalise_role(step_data.get("role"))
+
         steps.append(PlanStep(
             index=index,
             goal=goal_text.strip(),
             depends_on=depends_on,
+            role=role,
         ))
 
     # Validate all depends_on indices exist
@@ -114,7 +134,14 @@ def decompose_goal(goal: str, max_subtasks: int, call_engine: Callable) -> Plan:
     # Validate no circular dependencies (Kahn's algorithm)
     _validate_dag(steps)
 
-    return Plan(root_goal=goal, steps=steps)
+    return Plan(root_goal=goal, steps=steps, idempotency_key=idempotency_key)
+
+
+def get_role_description(name: str) -> str:
+    """One-line description of a role, for the planner prompt."""
+    from .roles import get_role
+
+    return get_role(name).description
 
 
 def _validate_dag(steps: list[PlanStep]) -> None:

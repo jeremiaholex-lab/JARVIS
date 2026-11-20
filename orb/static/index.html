@@ -594,6 +594,15 @@ body.hud #hudnote.show { opacity: 1; }
       </div>
     </section>
     <section>
+      <h2>File watchers <span class="mini" id="watcherNote">opt-in · local only</span></h2>
+      <p class="hint">Watch an approved folder for matching file changes. JARVIS only queues read-only tasks; existing files are not processed when you first add a watcher.</p>
+      <div class="setrow"><label for="watchRoot">Approved folder</label><input id="watchRoot" type="text" placeholder="C:\\Users\\you\\Documents\\notes"></div>
+      <div class="setrow"><label for="watchPattern">File pattern</label><input id="watchPattern" type="text" value="**/*.md" placeholder="**/*.md"></div>
+      <div class="setrow"><label for="watchInstruction">When a file changes</label><input id="watchInstruction" type="text" value="Summarize the changed file and its important points."></div>
+      <button id="btnAddWatcher" class="ctl">Add watcher</button>
+      <div id="watcherBox"><div class="hint">No file watchers configured.</div></div>
+    </section>
+    <section>
       <h2>Raised Issues <span class="mini" id="alertNote">proactive · §6.9</span></h2>
       <div id="alertBox"><div class="hint">Nothing raised yet.</div></div>
     </section>
@@ -908,7 +917,7 @@ function handleOp(m) {
       wsClientId = m.client_id || null;
       fillSettings(settings);
       if (m.wake_diagnostic) updateMicDiagnostic(m.wake_diagnostic);
-      if (!HUD_MODE) loadModels();
+      if (!HUD_MODE) { loadModels(); loadWatchers(); }
       if (m.tools) {
         document.getElementById("agentNote").textContent =
           "agent tools: " + m.tools.join(", ") +
@@ -1051,6 +1060,57 @@ function updateMicDiagnostic(d) {
     `${micChunkCount} chunks sent (${(micSampleCount / 16000).toFixed(1)}s) · ${sample}`;
   el.classList.toggle("bad", !micEnabled || (micChunkCount > 20 && serverChunks === 0));
 }
+
+async function watcherRequest(path, method = "GET", body = null) {
+  const options = { method, headers: { "X-Jarvis-Task-Token": window.__JARVIS_TASK_TOKEN || "" } };
+  if (body !== null) { options.headers["Content-Type"] = "application/json"; options.body = JSON.stringify(body); }
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || ("Request failed (" + response.status + ")"));
+  return data;
+}
+async function loadWatchers() {
+  const box = document.getElementById("watcherBox");
+  if (!box || HUD_MODE) return;
+  try {
+    const data = await watcherRequest("/api/watchers");
+    const items = data.watchers || [];
+    document.getElementById("watcherNote").textContent = items.length + " configured · local only";
+    box.replaceChildren();
+    if (!items.length) { box.innerHTML = '<div class="hint">No file watchers configured.</div>'; return; }
+    for (const watcher of items) {
+      const card = document.createElement("div"); card.className = "skill-card";
+      const title = document.createElement("div"); title.className = "head";
+      const name = document.createElement("b"); name.textContent = watcher.pattern;
+      const status = document.createElement("span"); status.className = "badge " + (watcher.enabled ? "approved" : "proposed");
+      status.textContent = watcher.enabled ? "active" : "paused";
+      title.append(name, status); card.appendChild(title);
+      const body = document.createElement("div"); body.className = "body";
+      const root = document.createElement("div"); root.className = "summary"; root.textContent = watcher.root;
+      const instruction = document.createElement("div"); instruction.className = "meta"; instruction.textContent = watcher.task_instruction;
+      body.append(root, instruction); card.appendChild(body);
+      const controls = document.createElement("div"); controls.className = "wc-actions";
+      const toggle = document.createElement("button"); toggle.className = "ctl"; toggle.textContent = watcher.enabled ? "Pause" : "Resume";
+      toggle.onclick = async () => { try { await watcherRequest("/api/watchers/" + encodeURIComponent(watcher.id) + "/" + (watcher.enabled ? "pause" : "resume"), "POST"); loadWatchers(); } catch (e) { showErr(e.message); } };
+      const remove = document.createElement("button"); remove.className = "ctl"; remove.textContent = "Remove";
+      remove.onclick = async () => { try { await watcherRequest("/api/watchers/" + encodeURIComponent(watcher.id) + "/remove", "POST"); loadWatchers(); } catch (e) { showErr(e.message); } };
+      controls.append(toggle, remove); card.appendChild(controls); box.appendChild(card);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="hint">File watchers unavailable: ' + e.message + '</div>';
+  }
+}
+document.getElementById("btnAddWatcher").onclick = async () => {
+  const button = document.getElementById("btnAddWatcher"); button.disabled = true;
+  try {
+    const root = document.getElementById("watchRoot").value.trim();
+    const pattern = document.getElementById("watchPattern").value.trim() || "**/*";
+    const task_instruction = document.getElementById("watchInstruction").value.trim();
+    await watcherRequest("/api/watchers", "POST", { root, pattern, task_instruction });
+    loadWatchers();
+  } catch (e) { showErr(e.message); }
+  finally { button.disabled = false; }
+};
 
 function renderAlerts(data) {
   const box = document.getElementById("alertBox");

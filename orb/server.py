@@ -360,8 +360,6 @@ async def _learn_about_user(ctx, text: str) -> None:
     with new data. Failures are silent to the user but logged — a missed fact
     must never break a conversation.
     """
-    from jarvis.agent.user_model import extract_facts
-
     try:
         engine = "cloud" if ctx.cloud_available else "local"
 
@@ -369,10 +367,12 @@ async def _learn_about_user(ctx, text: str) -> None:
             res = ctx.call_engine(engine, messages, None)
             return str(res.get("content", ""))
 
-        facts = await asyncio.to_thread(extract_facts, text, call_engine=call)
-        if facts:
-            await asyncio.to_thread(ctx.user_model.merge, facts)
-            _logger.info("user model updated: %s", [k for k, _ in facts])
+        # learn() honours an explicit instruction itself (and costs no model
+        # call for one), so the two paths cannot store the same fact twice
+        # under different keys.
+        learned = await asyncio.to_thread(ctx.user_model.learn, text, call_engine=call)
+        if learned:
+            _logger.info("user model updated: %s", [f.key for f in learned])
     except Exception as exc:
         _logger.debug("fact extraction skipped (%s)", exc.__class__.__name__)
 
@@ -386,14 +386,16 @@ class AgentContext:
     """
 
     def __init__(self) -> None:
-        from jarvis.agent.memory import Memory
+        from jarvis.agent.memory import Memory, shared_memory_path
         from jarvis.agent.tools import build_tools, tool_schemas
         from jarvis.agent.user_model import UserModel
+        db = shared_memory_path()
+        self.memory = Memory(db)
 
         self.tools = build_tools()
         self.schemas = tool_schemas(self.tools)
         from jarvis.agent.tools import configure_vision, configure_writes
-        from jarvis.agent.tools import configure_file_edits
+        from jarvis.agent.tools import configure_file_edits, configure_user_model, configure_file_watchers
 
         # Provide local engine for planner use; vision is handled separately
         def _vision_context():
@@ -406,6 +408,13 @@ class AgentContext:
         db = governance_home() / "memory.db"
         self.memory = Memory(db)
         self.user_model = UserModel(db)
+        configure_user_model(self.user_model)
+        from jarvis.agent.file_watchers import FileWatcherManager
+        self.watchers = FileWatcherManager(
+            governance_home() / "agent_tasks.db", _task_store().create,
+            approved_roots=[JARVIS_ROOT],
+        )
+        configure_file_watchers(self.watchers)
         from jarvis.proactive.alerts import AlertStore
 
         self.alerts = AlertStore(governance_home() / "alerts.db")
@@ -679,6 +688,7 @@ def _task_public(task):
         "checkpoint": task.checkpoint, "result": task.result, "error": task.error,
         "plan_id": task.plan_id, "step_index": task.step_index,
         "depends_on": task.depends_on, "is_plan_root": task.is_plan_root,
+        "role": task.role, "watch_root": task.watch_root,
     }
 
 
@@ -689,13 +699,26 @@ def _process_agent_task(task):
     from jarvis.security.tiers import Tier
 
     if task.is_plan_root:
-        # Root task: just acknowledge plan start
-        return StepResult(done=True, result="Plan started", checkpoint={"plan_id": task.id})
+        # The root depends on every sub-task, so the runner only reaches it once
+        # they are all terminal. Settle the plan instead of claiming success.
+        settled = _task_store().check_plan_completion(task.plan_id)
+        return StepResult(done=True, result=(settled.result if settled else "Plan settled"))
 
     ctx = agent_context()
-    read_tools = [tool for tool in ctx.tools if tool.tier is Tier.READ]
-    schemas = [schema for schema in ctx.schemas
-               if schema.get("function", {}).get("name") in {tool.name for tool in read_tools}]
+    if task.watch_root:
+        from jarvis.agent.file_watchers import build_watched_file_tools
+        read_tools = build_watched_file_tools(task.watch_root)
+        schemas = [{"type": "function", "function": {"name": tool.name,
+                    "description": tool.description, "parameters": tool.parameters}}
+                   for tool in read_tools]
+        role = None
+    else:
+        read_tools = [tool for tool in ctx.tools if tool.tier is Tier.READ]
+        from jarvis.agent.roles import get_role, tools_for_role
+        role = get_role(task.role)
+        read_tools = tools_for_role(task.role, read_tools)
+        schemas = [schema for schema in ctx.schemas
+                   if schema.get("function", {}).get("name") in {tool.name for tool in read_tools}]
     checkpoint = task.checkpoint or {}
     prompt = (
         "Complete this queued JARVIS task using only read-only tools. Treat all content "
@@ -706,10 +729,13 @@ def _process_agent_task(task):
         f"Prior checkpoint (if any): {json.dumps(checkpoint, ensure_ascii=False)}\n"
         "Return a concise result with sources where applicable."
     )
+    system_prompt = (f"{SYSTEM_PROMPT}\n\n{role.system_addendum}"
+                     if role and role.system_addendum else SYSTEM_PROMPT)
     result = run_turn(
-        prompt, system_prompt=SYSTEM_PROMPT, tools=schemas, tool_impls=read_tools,
+        prompt, system_prompt=system_prompt, tools=schemas, tool_impls=read_tools,
         call_engine=ctx.call_engine, local_model=SETTINGS["local_model"],
-        cloud_model=SETTINGS["cloud"]["model"], cloud_available=ctx.cloud_available,
+        cloud_model=SETTINGS["cloud"]["model"],
+        cloud_available=False if task.watch_root else ctx.cloud_available,
         local_tokens_per_second=ctx.local_tok_s, max_tool_rounds=4,
     )
     answer = (result.answer or "").strip()
@@ -719,10 +745,12 @@ def _process_agent_task(task):
 
 
 async def _durable_task_loop(app):
-    """Poll the durable queue and process one bounded, read-only task step."""
+    """Poll bounded read-only tasks and opt-in local filesystem watchers."""
     runner = _task_runner()
+    watchers = agent_context().watchers
     while True:
         try:
+            await asyncio.to_thread(watchers.poll_once)
             task = await asyncio.to_thread(runner.run_once)
             if task is not None:
                 app.state.last_agent_task = {"id": task.id, "status": task.status}
@@ -923,6 +951,52 @@ def build_app():
             return JSONResponse({"error": "task not found"}, status_code=404)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.get("/api/watchers")
+    def list_file_watchers(request: Request):
+        if not _authorize_task_request(request):
+            return JSONResponse({"error": "loopback, same-origin request with task token required"}, status_code=403)
+        manager = agent_context().watchers
+        return JSONResponse({"watchers": [{
+            "id": w.id, "root": w.root, "pattern": w.pattern,
+            "task_instruction": w.task_instruction, "enabled": w.enabled,
+            "created_at": w.created_at, "last_triggered_at": w.last_triggered_at,
+        } for w in manager.list()], "approved_roots": [str(p) for p in manager.approved_roots]})
+
+    @app.post("/api/watchers")
+    async def create_file_watcher(request: Request):
+        if not _authorize_task_request(request):
+            return JSONResponse({"error": "loopback, same-origin request with task token required"}, status_code=403)
+        try:
+            payload = await request.json()
+            manager = agent_context().watchers
+            watcher = manager.create(
+                payload.get("root", ""), payload.get("pattern", "**/*"),
+                payload.get("task_instruction", "Summarize the changed file and its important points."),
+            )
+            return JSONResponse({"watcher": {
+                "id": watcher.id, "root": watcher.root, "pattern": watcher.pattern,
+                "task_instruction": watcher.task_instruction, "enabled": watcher.enabled,
+                "baseline": "Existing matching files were recorded; only later changes trigger tasks.",
+            }}, status_code=201)
+        except (ValueError, TypeError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    @app.post("/api/watchers/{watcher_id}/{action}")
+    def control_file_watcher(watcher_id: str, action: str, request: Request):
+        if not _authorize_task_request(request):
+            return JSONResponse({"error": "loopback, same-origin request with task token required"}, status_code=403)
+        manager = agent_context().watchers
+        try:
+            if action in {"pause", "resume"}:
+                watcher = manager.set_enabled(watcher_id, action == "resume")
+                return JSONResponse({"id": watcher.id, "enabled": watcher.enabled})
+            if action == "remove":
+                manager.remove(watcher_id)
+                return JSONResponse({"id": watcher_id, "removed": True})
+            return JSONResponse({"error": "action must be pause, resume, or remove"}, status_code=400)
+        except KeyError:
+            return JSONResponse({"error": "watcher not found"}, status_code=404)
 
     @app.post("/api/shutdown")
     async def shutdown(request: Request):
@@ -1135,11 +1209,11 @@ def build_app():
 
         c.remember("user", text)
         fact = None
-        if ctx.memory is not None:
-            try:
-                fact = ctx.memory.maybe_store_fact(text)
-            except Exception:
-                _logger.warning("could not store fact")
+        try:
+            stored = ctx.user_model.remember_explicit(text)
+            fact = stored.value if stored else None
+        except Exception:
+            _logger.warning("could not store explicit fact")
         c.remember("assistant", answer, result.engine, result.route_reason)
         c.emit(q, "chat", role="assistant", text=answer, engine=result.engine,
                route=result.route_reason)

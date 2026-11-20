@@ -203,6 +203,8 @@ SYSTEM_PROMPT = (
     "do not introduce yourself by the underlying model's name unless asked specifically about the technical model. "
     "You were created by Jeremiah Olan. If asked who created you, answer: Jeremiah Olan. "
     "Answer concisely, in one to three plain sentences unless asked to elaborate. "
+    "You can see the user's screen: when asked what is on it, or what some app is "
+    "showing, use the screen tools instead of guessing. "
     "No markdown, no bullet lists — your reply will be spoken aloud."
 )
 
@@ -508,9 +510,11 @@ class AgentContext:
         from jarvis.agent.tools import configure_vision, configure_writes
         from jarvis.agent.tools import configure_file_edits, configure_user_model, configure_file_watchers
 
-        # Provide local engine for planner use; vision is handled separately
+        # Provide local engine for planner use; vision is handled separately.
+        # cloud_engine is a lazy factory *method* — pass the engine it builds,
+        # not the method: look_at_screen reads _api_key off the object.
         def _vision_context():
-            return self.local, self.cloud_engine, SETTINGS
+            return self.local, self.cloud_engine(), SETTINGS
         configure_vision(_vision_context)
         self.writes = self._build_writes()
         configure_writes(self.writes)
@@ -548,7 +552,7 @@ class AgentContext:
 
     def _vision_context(self):
         """What the look_at_screen tool needs: engines plus current settings."""
-        return self.local, self.cloud_engine, SETTINGS
+        return self.local, self.cloud_engine(), SETTINGS
 
     def _build_writes(self):
         """Deterministic-only secured write executor over the local project

@@ -18,8 +18,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
-from .routing import (LOW_CONFIDENCE, Route, _ascii_text, needs_retry,
-                      route_turn, tool_nudge_needed)
+from .routing import (LOW_CONFIDENCE, Route, _ascii_text, looks_like_screen_request,
+                      needs_retry, route_turn, tool_nudge_needed)
 
 _logger = logging.getLogger(__name__)
 
@@ -105,9 +105,14 @@ def _run_engine_pass(
     """Drive the tool loop on one engine; return the final text answer."""
     working = list(msgs)
     answer = ""
-    for _round in range(max(1, max_rounds)):
+    rounds = max(1, max_rounds)
+    for round_index in range(rounds):
         t0 = time.time()
-        res = call_engine(engine, working, tools or None)
+        # The last round is answer-only: handing tools to a small model that
+        # has already looked (a screen reading, a search digest) just invites
+        # another call, and the turn dies at the limit guard with no reply.
+        # With no tools offered the model must say what it found.
+        res = call_engine(engine, working, tools if round_index < rounds - 1 else None)
         ms = round((time.time() - t0) * 1000)
         calls = res.get("tool_calls") or []
         if not calls:
@@ -139,6 +144,18 @@ def _run_engine_pass(
     return "I could not finish that in one go — please narrow it down."
 
 
+def _has_tool(tools: Sequence, name: str) -> bool:
+    """Was `name` offered to the model this turn? Works on both the dict
+    schemas and AgentTool objects callers may pass."""
+    for t in tools or ():
+        if isinstance(t, dict):
+            if (t.get("function") or {}).get("name") == name or t.get("name") == name:
+                return True
+        elif getattr(t, "name", "") == name:
+            return True
+    return False
+
+
 def run_turn(
     text: str,
     *,
@@ -163,6 +180,24 @@ def run_turn(
     tools = list(tools)
     tool_impls = list(tool_impls)
     msgs = _messages(f"{system_prompt}\n\n{TOOL_GUIDANCE}" if tools else system_prompt, memory, text)
+    # "What am I looking at?" has no data the model can reason about — a
+    # confident local answer is by definition invented. When the question
+    # names the screen and a vision tool exists, steer before the first
+    # pass rather than gambling on the post-hoc nudge.
+    if (tools and not force_cloud
+            and looks_like_screen_request(text)
+            and _has_tool(tools, "look_at_screen")):
+        target = (' with window="<app or title>" for a specific app, or '
+                  'window="" for the whole screen; use list_open_windows '
+                  'first if the app is unclear. ') \
+            if _has_tool(tools, "list_open_windows") else " "
+        msgs.append({
+            "role": "system",
+            "content": "The user is asking about their actual screen. Call "
+                       "look_at_screen now" + target +
+                       "Never answer from imagination about screen contents. "
+                       "If the tool says consent is needed, relay that exactly.",
+        })
     trace: List[dict] = []
     tools_used: List[str] = []
 

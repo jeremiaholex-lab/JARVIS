@@ -75,6 +75,23 @@ def promises_unkept_action(answer: str) -> bool:
     return bool(PROMISES_ACTION.match(_ascii_text(answer)))
 
 
+def looks_like_screen_request(text: str) -> bool:
+    """Does this utterance ask what is on the user's screen?
+
+    The canonical regex lives with the vision code (jarvis.vision.describe);
+    routing reaches it lazily because importing that module pulls httpx in,
+    and this file must stay importable from a bare unit test. Without a hard
+    dependency the conservative pattern here is a superset of nothing — if
+    the import ever fails we simply skip the steer, exactly the pre-feature
+    behaviour.
+    """
+    try:
+        from jarvis.vision.describe import looks_like_screen_request as _impl
+        return _impl(text)
+    except Exception:
+        return False
+
+
 def tool_nudge_needed(answer: str, *, used_tools: bool) -> bool:
     """Should this answer be sent back with "actually use the tool"?
 

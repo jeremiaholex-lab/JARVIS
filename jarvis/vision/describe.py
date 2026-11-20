@@ -82,8 +82,14 @@ def describe_screen(
     local_engine,
     cloud_factory,
     settings: dict,
+    api_key: str = "",
 ) -> VisionResult:
-    """Read the current screen. Local model wins; cloud needs consent."""
+    """Read the current screen. Local model wins; cloud needs consent.
+
+    `api_key` lets hosts that load secrets lazily (the orb keeps AGNES_API_KEY
+    in a parsed .env dict, not os.environ) hand the key over explicitly; the
+    environment is still the fallback.
+    """
     started = time.time()
     prompt = (
         "You are looking at the user's screen on their behalf. Answer the "
@@ -116,7 +122,7 @@ def describe_screen(
 
     cloud = settings.get("cloud") or {}
     base = (cloud.get("base_url") or "").rstrip("/").removesuffix("/v1") + "/v1"
-    api_key = os.environ.get("AGNES_API_KEY", "")
+    api_key = api_key or os.environ.get("AGNES_API_KEY", "")
     if not base or not api_key:
         return VisionResult("Cloud vision is not configured (no base URL or API key).", "", "none",
                             round((time.time() - started) * 1000), reason="cloud not configured")

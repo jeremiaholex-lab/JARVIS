@@ -492,9 +492,14 @@ def configure_vision(provider) -> None:
     _VISION_PROVIDER = provider
 
 
-def _look_at_screen(question: str = "what is on this screen?") -> str:
+def _look_at_screen(question: str = "what is on this screen?",
+                    window: str = "") -> str:
     """§6.7 screen perception. Capture is local and free; the *reading* may
-    not be, so consent is checked before a single pixel is sent anywhere."""
+    not be, so consent is checked before a single pixel is sent anywhere.
+
+    `window` targets one app by title or process name (its own pixels, even
+    behind other windows); empty reads the whole display.
+    """
     from jarvis.vision.describe import describe_screen
     from jarvis.vision.screen import ScreenCapture, ScreenCaptureError
 
@@ -503,15 +508,24 @@ def _look_at_screen(question: str = "what is on this screen?") -> str:
     if not ScreenCapture.available():
         return json.dumps({"error": "no screen capture backend on this host"})
     local_engine, cloud_factory, settings = _VISION_PROVIDER()
+    # The host's cloud engine already carries the API key (loaded from .env,
+    # not os.environ, by design). Reaching it here keeps describe_screen's
+    # env fallback working without forcing every host to export secrets.
+    api_key = getattr(cloud_factory, "_api_key", "") or ""
     try:
-        screen = ScreenCapture(ttl=2.0).grab()
+        capture = ScreenCapture(ttl=2.0)
+        if window:
+            screen = capture.capture_window(window)
+        else:
+            screen = capture.grab()
     except ScreenCaptureError as exc:
         return json.dumps({"error": f"screen capture failed: {exc}"})
     except Exception as exc:
         return json.dumps({"error": f"screen capture failed: {exc.__class__.__name__}"})
     try:
         result = describe_screen(screen, question, local_engine=local_engine,
-                                 cloud_factory=cloud_factory, settings=settings)
+                                 cloud_factory=cloud_factory, settings=settings,
+                                 api_key=api_key)
     except Exception as exc:
         return json.dumps({"error": f"vision model failed: {exc.__class__.__name__}"})
     return json.dumps({
@@ -519,7 +533,24 @@ def _look_at_screen(question: str = "what is on this screen?") -> str:
         "where": result.where,
         "model": result.model,
         "capture": f"{screen.width}x{screen.height} {result.ms}ms",
+        "source": screen.backend,
         "reason": result.reason,
+    }, ensure_ascii=False)
+
+
+def _list_open_windows() -> str:
+    """The 'different apps' half of screen perception: which windows exist,
+    so the model can target one it cannot see in a whole-screen grab."""
+    from jarvis.vision.screen import ScreenCapture, ScreenCaptureError
+
+    try:
+        windows = ScreenCapture().list_windows()
+    except ScreenCaptureError as exc:
+        return json.dumps({"error": f"window listing failed: {exc}"})
+    except Exception as exc:
+        return json.dumps({"error": f"window listing failed: {exc.__class__.__name__}"})
+    return json.dumps({
+        "windows": [{"title": w.title, "process": w.process} for w in windows],
     }, ensure_ascii=False)
 
 
@@ -743,16 +774,33 @@ def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[Agent
     screen = _check_tier(
         "look_at_screen",
         _look_at_screen,
-        "Look at the user's current screen and answer a question about it — an error "
-        "message, what window is open, text on display. Reading stays on-device when a "
-        "local vision model exists; otherwise it requires the user's vision consent and "
-        "returns an explanation instead of sending anything.",
-        {"type": "object", "properties": {"question": {"type": "string"}}},
+        "Look at the user's screen — the whole display, or one app's window by "
+        "name (window='Chrome', or an exact title from list_open_windows). Use "
+        "for an error message, visible text, or what a specific app is showing. "
+        "Reading stays on-device when a local vision model exists; otherwise it "
+        "requires the user's vision consent and returns an explanation instead "
+        "of sending anything.",
+        {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "window": {"type": "string",
+                            "description": "app or window title to capture; empty = whole screen"},
+            },
+        },
+    )
+    windows_tool = _check_tier(
+        "list_open_windows",
+        _list_open_windows,
+        "List the titles and process names of the user's open windows. Use "
+        "before look_at_screen when the user names an app, or when a window "
+        "match is ambiguous — it returns the exact titles to target.",
+        {"type": "object", "properties": {}},
     )
     tools.extend([t for t in (projects, rag, google, web, files_read, files_list,
                                files_search, notion, task_enqueue, task_status,
                                task_schedule, plan_and_enqueue,
-                               file_watch, clock, screen) if t is not None])
+                               file_watch, clock, screen, windows_tool) if t is not None])
 
     # Sandbox and browser automation. All six are READ-tier: the sandbox is
     # AST-validated and run inside the Docker/restricted-process boundary, and

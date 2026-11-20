@@ -138,6 +138,8 @@ def classify(action: PlannedAction) -> Tier:
         "browser_get",
         "get_current_time",
         "look_at_screen",  # §6.7: looking at the screen is a read-only action
+        "list_open_windows",  # same reasoning: enumerating window titles reads,
+                              # it does not touch anything
         "grep",
         "glob",
         "ls",

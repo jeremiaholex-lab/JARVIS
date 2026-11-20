@@ -223,3 +223,101 @@ def test_past_failures_are_not_replayed_into_the_prompt():
     )
     # system + 3 surviving memory messages (the failure was dropped) + this user turn
     assert engine.seen[0][1] == 5
+
+
+# ---------------------------------------------------------------------------
+# screen-request steering: a question about the actual display must reach
+# look_at_screen, never a confident invention from the small model.
+# ---------------------------------------------------------------------------
+
+SCREEN_SCHEMA = [{"type": "function", "function": {"name": "look_at_screen"}},
+                 {"type": "function", "function": {"name": "list_open_windows"}}]
+
+
+def _engine_with_capture(responses):
+    seen = []
+
+    def call(engine, msgs, tools):
+        seen.append(list(msgs))
+        return responses[len(seen) - 1]
+
+    call.seen = seen
+    return call
+
+
+def test_screen_question_steers_to_the_vision_tool():
+    impls = [type("T", (), {"name": "look_at_screen"})()]
+    engine = _engine_with_capture([
+        {"content": "", "tool_calls": [
+            {"id": "c1", "name": "look_at_screen",
+             "arguments": '{"question": "what is on my screen?", "window": ""}'}]},
+        {"content": "Your editor is showing a Python file with a failing test.",
+         "usage": {}},
+    ])
+    result = run_turn(
+        "what is on my screen",
+        system_prompt="You are JARVIS.",
+        memory=[], tools=SCREEN_SCHEMA, tool_impls=impls,
+        call_engine=engine, local_model="qwen3:1.7b", cloud_model="agnes",
+    )
+    first_msgs = engine.seen[0]
+    steer = [m for m in first_msgs
+             if m.get("role") == "system" and "look_at_screen now" in m.get("content", "")]
+    assert steer, "expected a pre-pass steering system message"
+    assert "list_open_windows" in steer[0]["content"]
+    assert result.tools_used == ["look_at_screen"]
+
+
+def test_screen_question_without_vision_tools_is_not_steered():
+    engine = _engine_with_capture([{"content": "Screens are made of pixels.", "usage": {}}])
+    run_turn(
+        "what is on my screen",
+        system_prompt="You are JARVIS.",
+        memory=[], tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_impls=[], call_engine=engine,
+        local_model="qwen3:1.7b", cloud_model="agnes",
+    )
+    assert not [m for m in engine.seen[0]
+                if m.get("role") == "system" and "look_at_screen" in m.get("content", "")]
+
+
+def test_ordinary_question_gets_no_screen_steer():
+    engine = _engine_with_capture([{"content": "Two plus two is four.", "usage": {}}])
+    run_turn(
+        "what is two plus two",
+        system_prompt="You are JARVIS.",
+        memory=[], tools=SCREEN_SCHEMA, tool_impls=[],
+        call_engine=engine, local_model="qwen3:1.7b", cloud_model="agnes",
+    )
+    assert not [m for m in engine.seen[0]
+                if m.get("role") == "system" and "look_at_screen" in m.get("content", "")]
+
+
+def test_last_round_is_answer_only_even_if_model_keeps_calling():
+    """A small model that would loop on tools must still produce a reply:
+    the final round is offered without tools."""
+    seen_tools = []
+
+    def call(engine, msgs, tools):
+        seen_tools.append(bool(tools))
+        if tools:
+            return {"content": "", "tool_calls": [
+                {"id": f"c{len(seen_tools)}", "name": "look_at_screen",
+                 "arguments": '{"question": "what is on screen"}'}]}
+        return {"content": "The desktop shows your project folders.", "usage": {}}
+
+    from jarvis.agent import tools as agent_tools
+    original = agent_tools.execute
+    agent_tools.execute = lambda impls, name, args: '{"seen": "folders"}'
+    try:
+        impls = [type("T", (), {"name": "look_at_screen"})()]
+        result = run_turn(
+            "what is on my screen right now",
+            system_prompt="You are JARVIS.", memory=[],
+            tools=SCREEN_SCHEMA, tool_impls=impls, call_engine=call,
+            local_model="qwen3:1.7b", cloud_model="agnes", max_tool_rounds=3,
+        )
+    finally:
+        agent_tools.execute = original
+    assert result.answer == "The desktop shows your project folders."
+    assert seen_tools[-1] is False, "last round must be offered without tools"

@@ -166,8 +166,10 @@ def _apply_unified_diff(patch: str, skill_root: Path) -> None:
         if not hunks:
             raise ValueError("unified diff has no hunks")
         original = target.read_text(encoding="utf-8").splitlines(keepends=True)
+        offset = 0
         for old_line, body in hunks:
-            cursor = max(0, old_line - 1)
+            start = max(0, old_line - 1 + offset)
+            cursor = start
             rebuilt: List[str] = []
             for line in body:
                 if line.startswith(" "):
@@ -181,7 +183,9 @@ def _apply_unified_diff(patch: str, skill_root: Path) -> None:
                     cursor += 1
                 else:
                     rebuilt.append(line[1:] + "\n")
-            original[cursor - sum(1 for line in body if line.startswith((" ", "-"))):cursor] = rebuilt
+            removed_or_context = cursor - start
+            original[start:cursor] = rebuilt
+            offset += len(rebuilt) - removed_or_context
         target.write_text("".join(original), encoding="utf-8")
 
 

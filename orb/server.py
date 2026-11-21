@@ -1653,7 +1653,8 @@ def build_app():
         # here competes for CPU and network while speech is being generated.
         c.pending_learning = text
         c.playback_id = uuid.uuid4().hex
-        c.emit(q, "tts_start", id=c.playback_id)
+        backend = "gemini" if hosted else "local"
+        c.emit(q, "tts_start", id=c.playback_id, backend=backend)
         c.playback_active = True
         _speech_begin()
         c.barge_frames = 0

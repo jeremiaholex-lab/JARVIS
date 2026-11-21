@@ -1039,24 +1039,26 @@ let ttsCurrentUrl = null;
 let ttsGeneration = 0;
 let ttsReplyId = null;
 let ttsPlaybackError = false;
+let ttsBackend = "";
+let voiceStatus = { backend: "unknown", hosted_available: false, cooldown_s: 0 };
 let primeTimer = null;
-/* Pre-roll: synthesis on this CPU runs slightly slower than realtime, so a
-   single buffered sentence plays out and then stalls until the next one is
-   ready. Holding the FIRST chunk briefly (never more than 1.5s) lets two
-   sentences queue up, which turns "speak, gap, speak" into continuous audio
-   with one small delay at the start. */
+/* Pre-roll only helps hosted synthesis: it prefetches several pieces, so a
+   short wait hides the gaps between them. Local Kokoro is synthesized one
+   piece at a time and cannot reliably queue a second piece inside this timer,
+   so waiting here would add a guaranteed delay before every local reply. */
 function scheduleStart(force) {
   if (ttsPlaying || !ttsQueue.length) return;
-  if (force || ttsStreamDone || ttsQueue.length >= 2) { startPlayback(); return; }
+  if (force || ttsStreamDone || ttsBackend !== "gemini") { startPlayback(); return; }
   if (!primeTimer) primeTimer = setTimeout(() => { primeTimer = null; startPlayback(); }, 1500);
 }
 function startPlayback() {
   if (primeTimer) { clearTimeout(primeTimer); primeTimer = null; }
   pumpQueue();
 }
-function beginTTS(id) {
+function beginTTS(id, backend) {
   cancelTTS(false);
   ttsReplyId = id || null;
+  ttsBackend = backend || "unknown";
   ttsBytes = 0;
   ttsPlaybackError = false;
 }
@@ -1078,6 +1080,7 @@ function cancelTTS(interrupted = true) {
   if (ttsCurrentUrl) URL.revokeObjectURL(ttsCurrentUrl);
   ttsCurrentUrl = null;
   ttsReplyId = null;
+  ttsBackend = "";
   speakingLevel = 0; spkBins.fill(0);
   if (interrupted) audioDebug("listening — speech interrupted", true);
 }
@@ -1097,7 +1100,9 @@ async function pumpQueue() {
       mes.connect(analyser); analyser.connect(ac.destination);
       audioElSourced = true;
     }
+    const speed = Math.max(0.5, Math.min(1.5, Number(settings?.tts_speed) || 1));
     audioEl.src = url;
+    audioEl.playbackRate = 1 / speed;
     audioEl.onended = () => {
       if (generation !== ttsGeneration) return;
       URL.revokeObjectURL(url);
@@ -1119,7 +1124,7 @@ async function pumpQueue() {
       if (ttsQueue.length) pumpQueue(); else if (ttsStreamDone) endSpeech();
     };
     await audioEl.play();
-    audioDebug("speaking (" + Math.round(ttsBytes / 1024) + " KB)", true);
+    audioDebug("speaking (" + Math.round(ttsBytes / 1024) + " KB · " + ttsBackend + ")", true);
   } catch (e) {
     URL.revokeObjectURL(url);
     if (generation !== ttsGeneration) return;
@@ -1365,7 +1370,7 @@ function handleOp(m) {
       markEditUndone(m.token, m.outcome);
       break;
     case "trace": renderTrace(m.trace); break;
-    case "tts_start": beginTTS(m.id); break;
+    case "tts_start": beginTTS(m.id, m.backend); break;
     case "tts_flush": flushSentence(m.index, m.ms); break;
     case "tts_done": if (!m.id || m.id === ttsReplyId) finishTTS(); break;
     case "barge_in": cancelTTS(); break;
@@ -2116,6 +2121,7 @@ function loadBrain() {
     const el = document.getElementById("voiceNote");
     if (!el || !st.voice) return;
     const v = st.voice;
+    voiceStatus = v;
     el.textContent = "voice: last reply spoken with "
       + (v.backend === "gemini" ? "the hosted Gemini voice" : "the local offline voice")
       + (v.hosted_available ? " (hosted available)"

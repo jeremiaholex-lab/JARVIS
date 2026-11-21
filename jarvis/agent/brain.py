@@ -324,7 +324,8 @@ class Brain:
             self._cloud = OpenAICompatEngine(host=base, api_key=self._cloud_key or None)
         return self._cloud
 
-    def call_engine(self, engine: str, msgs: List[dict], tools: Optional[List[dict]]) -> dict:
+    def call_engine(self, engine: str, msgs: List[dict], tools: Optional[List[dict]],
+                    max_tokens: int = 400) -> dict:
         """Adapt plain dicts to the framework's Message/ToolCall shapes."""
         from openjarvis.core.types import Message, Role, ToolCall
 
@@ -343,7 +344,7 @@ class Brain:
                 tool_call_id=m.get("tool_call_id"),
             ))
         kwargs: dict = {"temperature": 0.3}
-        kwargs["max_tokens"] = 400 if engine == "cloud" else 220
+        kwargs["max_tokens"] = max_tokens
         if tools:
             kwargs["tools"] = tools
         if engine == "cloud":

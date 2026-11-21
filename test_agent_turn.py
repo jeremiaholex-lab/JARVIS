@@ -20,7 +20,7 @@ def make_engine(responses):
     queue = list(responses)
     seen = []
 
-    def call(engine, msgs, tools):
+    def call(engine, msgs, tools, max_tokens=None):
         seen.append((engine, len(msgs), bool(tools)))
         res = queue.pop(0)
         if isinstance(res, Exception):
@@ -237,7 +237,7 @@ SCREEN_SCHEMA = [{"type": "function", "function": {"name": "look_at_screen"}},
 def _engine_with_capture(responses):
     seen = []
 
-    def call(engine, msgs, tools):
+    def call(engine, msgs, tools, max_tokens=None):
         seen.append(list(msgs))
         return responses[len(seen) - 1]
 
@@ -298,7 +298,7 @@ def test_last_round_is_answer_only_even_if_model_keeps_calling():
     the final round is offered without tools."""
     seen_tools = []
 
-    def call(engine, msgs, tools):
+    def call(engine, msgs, tools, max_tokens=None):
         seen_tools.append(bool(tools))
         if tools:
             return {"content": "", "tool_calls": [

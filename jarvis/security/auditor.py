@@ -7,9 +7,10 @@ or flag an action — it cannot execute anything itself.
 Two layers (so it is trustworthy and testable):
   1. Deterministic critic — tier + secret/heuristic + high-risk patterns.
      Always available; this is the part the demo relies on.
-  2. LLM critic (optional) — local Ollama first, escalate to Agnes cloud when
-     the deterministic layer flags something or the user asks to "think hard".
-     Never fatal: if no engine is reachable, the deterministic verdict stands.
+  2. LLM critic (optional) — local Ollama first, cloud on an explicit "think
+     hard" request. It runs only after a clean deterministic PASS and can
+     downgrade that PASS to HOLD or FLAG. If no engine is reachable, the
+     verdict HOLDS: a missing critic is never treated as approval.
 """
 from __future__ import annotations
 
@@ -99,6 +100,11 @@ class Auditor:
             llm = self._llm_critic(action)
             if llm is not None:
                 return llm
+            return Verdict(
+                decision=Decision.HOLD,
+                tier=tier,
+                reason="LLM critic was unavailable or unreadable",
+            )
         return verdict
 
     # ------------------------------------------------------------------
@@ -146,7 +152,9 @@ class Auditor:
             ]
             res = engine.generate(messages, model=model, max_tokens=120, temperature=0.0)
             text = _content_of(res)
-            decision = _first_enum(text, ("pass", "hold", "flag"), "pass")
+            decision = _first_enum(text, ("pass", "hold", "flag"), None)
+            if decision is None:
+                return None
             reason = _extract_reason(text)
             tier = classify(action)
             return Verdict(
@@ -157,7 +165,8 @@ class Auditor:
                 requires_typed_confirm=(decision == "flag"),
             )
         except Exception:
-            # No engine / transient error: deterministic verdict stands (PASS).
+            # No engine / transient error: hold rather than treating a failed
+            # critic as approval.
             return None
 
     def _select_engine(self, action: PlannedAction):

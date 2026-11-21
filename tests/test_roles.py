@@ -52,7 +52,7 @@ ALL_TOOL_NAMES = [
 
 
 def _engine_returning(steps):
-    def call_engine(engine, msgs, tools):
+    def call_engine(engine, msgs, tools, max_tokens=None):
         return {"content": json.dumps({"steps": steps})}
 
     return call_engine
@@ -133,7 +133,7 @@ def test_planner_coerces_unknown_role_instead_of_failing():
 def test_planner_prompt_lists_available_roles():
     seen = {}
 
-    def call_engine(engine, msgs, tools):
+    def call_engine(engine, msgs, tools, max_tokens=None):
         seen["prompt"] = msgs[0]["content"]
         return {"content": json.dumps({"steps": [
             {"index": 0, "goal": "a", "depends_on": [], "role": "general"},

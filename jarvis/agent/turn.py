@@ -43,9 +43,8 @@ TOOL_GUIDANCE = (
     "prices, weather, releases, scores, who won - because your training data is "
     "older than today; never date a remembered fact as if it were current. "
     "If a tool reports an endpoint failure, say the service did not answer - "
-    "never blame a missing dependency or a missing tool. Use a tool "
-    "and the current time. Use a tool "
-    "whenever the answer depends on that data instead of guessing. Never "
+    "never blame a missing dependency or a missing tool. Use a tool whenever "
+    "the answer depends on data that can change instead of guessing. Never "
     "invent a fact about the user's projects, files, or schedule. When you "
     "need data, call the tool now — do not say you will search, and do not "
     "claim you cannot find something without having called a tool. "
@@ -71,7 +70,7 @@ class TurnResult:
     tools_used: List[str] = field(default_factory=list)
 
 
-EngineCall = Callable[[str, List[Dict], Optional[List[Dict]]], Dict]
+EngineCall = Callable[[str, List[Dict], Optional[List[Dict]], int], Dict]
 
 
 def _messages(system_prompt: str, memory: Sequence, text: str) -> List[Dict]:
@@ -118,7 +117,8 @@ def _run_engine_pass(
         # has already looked (a screen reading, a search digest) just invites
         # another call, and the turn dies at the limit guard with no reply.
         # With no tools offered the model must say what it found.
-        res = call_engine(engine, working, tools if round_index < rounds - 1 else None)
+        res = call_engine(engine, working, tools if round_index < rounds - 1 else None,
+                          max_tokens)
         ms = round((time.time() - t0) * 1000)
         calls = res.get("tool_calls") or []
         if not calls:

@@ -41,7 +41,7 @@ def _run_turn_case(utterance: str, spec: dict) -> None:
     script = list(spec.get("script", []))
     calls = []
 
-    def call_engine(engine, msgs, tools):
+    def call_engine(engine, msgs, tools, max_tokens=None):
         if not script:
             raise AssertionError(f"script exhausted on a {engine} call")
         resp = script.pop(0)

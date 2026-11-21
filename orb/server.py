@@ -828,7 +828,8 @@ class AgentContext:
     def cloud_available(self) -> bool:
         return bool(ENV.get("AGNES_API_KEY"))
 
-    def call_engine(self, engine: str, msgs: list[dict], tools: list[dict] | None) -> dict:
+    def call_engine(self, engine: str, msgs: list[dict], tools: list[dict] | None,
+                    max_tokens: int = 400) -> dict:
         """One model call through the hosted ladder.
 
         run_turn's two engine tokens keep their meaning: "local" is the
@@ -839,7 +840,7 @@ class AgentContext:
         """
         purpose = "deep" if engine == "cloud" else "standard"
         tier, resp = self.ladder.call(msgs, tools, purpose=purpose,
-                                      max_tokens=400 if engine == "cloud" else 300)
+                                      max_tokens=max_tokens)
         resp["_tier"] = tier.id
         resp["_label"] = tier.label
         return resp

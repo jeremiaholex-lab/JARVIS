@@ -13,11 +13,23 @@ namespace JARVIS.Orb;
 /// </summary>
 public sealed class OrbAppContext : ApplicationContext
 {
-    private readonly Process? _backend;
+    private Process? _backend;
+    private bool _ownsBackend;
     private readonly NotifyIcon _tray;
     private readonly HotKeyWindow _hotkey;
     private readonly ToolStripMenuItem _hudItem;
     private readonly IntPtr _trayIconHandle;
+
+    // Backend supervision. When we launched the backend ourselves and it dies
+    // (OOM on this box is the realistic case: whisper + kokoro + ollama push
+    // past 15 GB), the orb is useless until the user restarts the shell.
+    // A UI-thread watchdog polls the child every 5 s and relaunches it with a
+    // crash-loop backoff, so a transient kill recovers silently while a truly
+    // broken server does not spin the machine.
+    private readonly System.Windows.Forms.Timer _backendWatchdog = new() { Interval = 5000 };
+    private int _restarts;
+    private DateTime _lastBackendStart = DateTime.MinValue;
+    private bool _gaveUpNotified;
 
     private OrbForm? _window;
     private OverlayForm? _overlay;
@@ -30,6 +42,8 @@ public sealed class OrbAppContext : ApplicationContext
     public OrbAppContext(bool startInHud)
     {
         (_backend, _) = ShellHost.Launch();
+        _ownsBackend = _backend is not null;
+        _lastBackendStart = DateTime.Now;
 
         _hudItem = new ToolStripMenuItem("Floating HUD\tCtrl+Alt+J", null, (_, _) => ToggleHud());
 
@@ -59,6 +73,70 @@ public sealed class OrbAppContext : ApplicationContext
 
         if (startInHud) SetHud(true);
         else ShowWindow();
+
+        _backendWatchdog.Tick += (_, _) => SuperviseBackend();
+        _backendWatchdog.Start();
+    }
+
+    /// <summary>
+    /// Relaunch a backend we own that exited unexpectedly. Bounded: more
+    /// than three exits inside their own first minute means the server is
+    /// broken, not unlucky, and a restart loop only burns the machine the
+    /// models need. An attach-mode shell (backend owned elsewhere) never
+    /// supervises or kills anything.
+    /// </summary>
+    private void SuperviseBackend()
+    {
+        if (_exiting || !_ownsBackend) return;
+        bool dead;
+        try { dead = _backend is null || _backend.HasExited; }
+        catch { dead = true; }
+        if (!dead) return;
+
+        // A backend that survived its first minute earns a fresh budget.
+        if (DateTime.Now - _lastBackendStart > TimeSpan.FromSeconds(60))
+            _restarts = 0;
+
+        if (_restarts >= 3)
+        {
+            if (!_gaveUpNotified)
+            {
+                _gaveUpNotified = true;
+                _tray.Text = "JARVIS — backend crashed repeatedly; restart the orb";
+                _tray.BalloonTipText = "The JARVIS backend crashed 3 times in a row. "
+                    + "Check orb\\backend.err.log, then restart the orb.";
+                _tray.ShowBalloonTip(6000, "JARVIS backend stopped", _tray.BalloonTipText,
+                    ToolTipIcon.Error);
+            }
+            return;
+        }
+
+        _restarts++;
+        try
+        {
+            _backend.Dispose();
+        }
+        catch { }
+        _backend = null;
+
+        try
+        {
+            var (proc, attached) = ShellHost.Launch(appendLog: true);
+            _backend = proc;
+            _ownsBackend = !attached;
+            _lastBackendStart = DateTime.Now;
+            _gaveUpNotified = false;
+            if (!attached)
+            {
+                _tray.BalloonTipText = "The JARVIS backend restarted (crash recovery).";
+                _tray.ShowBalloonTip(3000, "JARVIS", _tray.BalloonTipText, ToolTipIcon.Info);
+            }
+        }
+        catch
+        {
+            // Launch failures keep _backend null; the next tick counts as
+            // another crash against the same budget until it is exhausted.
+        }
     }
 
     // ------------------------------------------------------------- surfaces
@@ -149,6 +227,7 @@ public sealed class OrbAppContext : ApplicationContext
         if (_exiting) return;
         _exiting = true;
 
+        _backendWatchdog.Stop();
         _hotkey.Dispose();
 
         _tray.Visible = false;

@@ -23,7 +23,7 @@ class FakeTTS:
         self.delay = delay
         self.calls = 0
 
-    def synthesize(self, text, voice_id=""):
+    def synthesize(self, text, voice_id="", speed=1.0):
         self.calls += 1
         time.sleep(self.delay)
         audio = b"RIFF" + bytes(4) + b"WAVE"

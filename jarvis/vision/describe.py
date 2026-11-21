@@ -82,8 +82,14 @@ def describe_screen(
     local_engine,
     cloud_factory,
     settings: dict,
+    api_key: str = "",
 ) -> VisionResult:
-    """Read the current screen. Local model wins; cloud needs consent."""
+    """Read the current screen. Local model wins; cloud needs consent.
+
+    `api_key` lets hosts that load secrets lazily (the orb keeps AGNES_API_KEY
+    in a parsed .env dict, not os.environ) hand the key over explicitly; the
+    environment is still the fallback.
+    """
     started = time.time()
     prompt = (
         "You are looking at the user's screen on their behalf. Answer the "
@@ -116,7 +122,7 @@ def describe_screen(
 
     cloud = settings.get("cloud") or {}
     base = (cloud.get("base_url") or "").rstrip("/").removesuffix("/v1") + "/v1"
-    api_key = os.environ.get("AGNES_API_KEY", "")
+    api_key = api_key or os.environ.get("AGNES_API_KEY", "")
     if not base or not api_key:
         return VisionResult("Cloud vision is not configured (no base URL or API key).", "", "none",
                             round((time.time() - started) * 1000), reason="cloud not configured")
@@ -155,13 +161,31 @@ def describe_screen(
 
 
 _VISION_HINT = re.compile(
-    r"\b(screen|display|monitor|what (do|can) you see|look at this|on my (screen|desktop))\b",
+    r"\b(screen|display|monitor|what (do|can) you see|look at this|on my (screen|desktop)|"
+    r"this window|that window|which window|what window)\b|"
+    r"\bwhat am i looking at\b",
+    re.I,
+)
+
+# An imperative about the display hardware is not a question about its
+# contents: "turn up the screen brightness" matches the hint on the word
+# "screen" but a screenshot answers nothing. Mixed sentences ("what's on my
+# screen — oh and turn the brightness down") lose the pre-pass steer, which
+# is the safe direction: the model still has the tool and can choose it.
+_VISION_NOT_CONTENT = re.compile(
+    r"\b(brightness|volume|contrast|resolution|refresh rate|screensaver|pixel)\b"
+    r"|\b(turn|turn (up|down)|lower|raise|increase|dim)\b[^.?!]*\b(screen|display|monitor)\b"
+    r"|\b(clean|wipe|dust|repair|replace|buy)\b[^.?!]*\b(screen|display|monitor)\b"
+    r"|\b(screen|display|monitor)\b[^.?!]*\b(clean|wipe|dust|repair|replace)\b",
     re.I,
 )
 
 
 def looks_like_screen_request(text: str) -> bool:
-    return bool(_VISION_HINT.search(text or ""))
+    t = text or ""
+    if _VISION_NOT_CONTENT.search(t):
+        return False
+    return bool(_VISION_HINT.search(t))
 
 
 def _clean(text: str) -> str:

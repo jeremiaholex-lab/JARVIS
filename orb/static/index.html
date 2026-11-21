@@ -2,33 +2,34 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>JARVIS — Orb Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,400;1,500&family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
   color-scheme: dark;
-  --bg: #07080d;
-  --panel: rgba(18, 21, 31, .72);
-  --panel-2: rgba(24, 28, 41, .72);
-  --inset: rgba(5, 6, 10, .6);
-  --edge: rgba(255, 255, 255, .09);
-  --edge-2: rgba(255, 255, 255, .05);
-  --ink: #eceff8;
-  --ink-dim: #a3abc0;
-  --ink-faint: #7a8398;
-  --accent-rgb: 140, 170, 255;
+  --bg: #09090b;
+  --panel: rgba(20, 19, 18, .74);
+  --panel-2: rgba(28, 26, 24, .74);
+  --inset: rgba(6, 6, 7, .62);
+  --edge: rgba(232, 208, 160, .15);
+  --edge-2: rgba(232, 208, 160, .08);
+  --ink: #f3eee4;
+  --ink-dim: #b9b2a4;
+  --ink-faint: #7f796d;
+  --accent-rgb: 214, 180, 118;
   --brass: rgb(var(--accent-rgb));
   --brass-deep: rgba(var(--accent-rgb), .45);
-  --ok: #7fd6a0;
-  --bad: #ff8a80;
-  --warn: #f2c46b;
-  --ink-title: #d6dbea;
-  --rust: rgba(255, 110, 100, .16);
-  --rust-edge: rgba(255, 110, 100, .45);
-  --rust-ink: #ffb3ab;
-  --disp: "Manrope", "Segoe UI", system-ui, sans-serif;
+  --ok: #8fcfa3;
+  --bad: #f09a8e;
+  --warn: #e6bf72;
+  --ink-title: #e9e2d3;
+  --rust: rgba(240, 120, 105, .14);
+  --rust-edge: rgba(240, 120, 105, .42);
+  --rust-ink: #f6b8ae;
+  --disp: "Cormorant Garamond", "Palatino Linotype", Georgia, serif;
   --body: "Manrope", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
@@ -115,6 +116,12 @@ section h2 .mini { font: 400 11px var(--mono); letter-spacing: .04em; color: var
 .msg.assistant .body { color: var(--ink); }
 .msg.error .body { color: var(--bad); }
 .msg.write-confirm .body { color: var(--ink); }
+/* restored from SQLite on reconnect: present, but visibly not today's words */
+.msg.past { opacity: .62; }
+.msg.resume {
+  margin: 2px 0 10px; padding: 8px 10px; border-left: 2px solid var(--line);
+  font: 400 11px/1.5 var(--mono); color: var(--ink-dim);
+}
 .msg.write-confirm .wc-line { font-size: 11px; color: var(--ink-dim); margin-bottom: 2px; }
 .msg.write-confirm .wc-what { font: 500 13px var(--mono); color: var(--brass); }
 .msg.write-confirm .wc-actions { display: flex; gap: 6px; margin-top: 7px; }
@@ -429,7 +436,7 @@ body:not(.hud) section h2 .mini { font: 400 10px var(--mono); color: var(--ink-f
 
 /* ---------------- Phase 5: floating HUD overlay ---------------- */
 #hudbar, #hudnote { display: none; }
-body.hud { background: #07080d; }
+body.hud { background: #09090b; }
 body.hud #app { display: block; height: 100vh; }
 body.hud header, body.hud .side, body.hud footer, body.hud #controls { display: none; }
 body.hud main { display: block; height: 100%; }
@@ -480,19 +487,334 @@ body.hud #hudnote.show { opacity: 1; }
   .side { max-width: none; min-width: 0; border-left: 0; border-top: 1px solid var(--edge-2); padding: 14px; }
   section h2 .mini { display: none; }
 }
+
+/* ---------------- v3: classic premium ---------------- */
+body { font-family: var(--body); letter-spacing: .005em; -webkit-font-smoothing: antialiased; }
+body:not(.hud) {
+  background: radial-gradient(120% 90% at 50% 0%, #15130f 0%, #0b0a09 55%, #070706 100%);
+}
+body:not(.hud)::before {
+  background:
+    radial-gradient(46% 46% at 50% 40%, rgba(var(--accent-rgb), .12), transparent 72%),
+    radial-gradient(80% 50% at 50% 118%, rgba(var(--accent-rgb), .07), transparent 70%),
+    radial-gradient(140% 100% at 50% 50%, transparent 55%, rgba(0,0,0,.55) 100%);
+}
+/* fine engraved frame */
+body:not(.hud)::after {
+  content: ""; position: fixed; inset: 10px; pointer-events: none; z-index: 0;
+  border: 1px solid var(--edge-2); border-radius: 18px;
+}
+
+body:not(.hud) header { padding: 26px 40px 0; }
+body:not(.hud) header h1 {
+  font: 600 24px/1 var(--disp); letter-spacing: .46em; text-transform: uppercase; opacity: 1;
+  color: var(--ink); display: inline-flex; align-items: center; gap: 16px;
+  text-shadow: 0 0 24px rgba(var(--accent-rgb), .25);
+}
+body:not(.hud) header h1::before, body:not(.hud) header h1::after {
+  content: ""; width: 26px; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .7));
+}
+body:not(.hud) header h1::after { transform: scaleX(-1); }
+body:not(.hud) #conn { font: 500 10px var(--mono); letter-spacing: .2em; color: var(--ink-faint); }
+body:not(.hud) #conn.ok { color: var(--ink-dim); }
+body:not(.hud) #conn.ok::before { background: var(--brass); box-shadow: 0 0 10px rgba(var(--accent-rgb), .8); }
+
+#btnPanel {
+  background: rgba(255,255,255,.02); border: 1px solid var(--edge); border-radius: 50%;
+  width: 38px; height: 38px; color: var(--ink-dim); margin-left: 6px;
+}
+#btnPanel:hover, #btnPanel[aria-expanded="true"] {
+  color: var(--brass); border-color: var(--brass-deep); background: rgba(var(--accent-rgb), .07);
+}
+
+body:not(.hud) .orb-col { padding: 0 32px 40px; }
+#orbstate {
+  font: 600 11px var(--body); letter-spacing: .5em; padding-left: .5em; margin-top: 2px; opacity: 1;
+  display: flex; align-items: center; justify-content: center; gap: 14px; color: rgb(var(--accent-rgb));
+}
+#orbstate::before, #orbstate::after { content: ""; width: 22px; height: 1px; background: currentColor; opacity: .45; }
+#caption {
+  max-width: 660px; font: 500 24px/1.38 var(--disp); color: var(--ink); letter-spacing: .005em;
+  margin-top: 18px; min-height: 66px; max-height: 5.6em;
+}
+#caption.user { font: italic 400 19px/1.4 var(--disp); color: var(--ink-faint); }
+
+/* composer */
+#quickrow {
+  width: min(600px, 100%); margin-top: 10px; padding: 7px; border-radius: 999px;
+  background: linear-gradient(180deg, rgba(30,28,25,.82), rgba(16,15,14,.82));
+  border: 1px solid var(--edge);
+  box-shadow: 0 18px 50px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,236,196,.07), inset 0 0 0 1px rgba(0,0,0,.4);
+}
+#quickrow:focus-within {
+  border-color: rgba(var(--accent-rgb), .55);
+  box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 4px rgba(var(--accent-rgb), .09), inset 0 1px 0 rgba(255,236,196,.07);
+}
+#quickinput { font: 400 15px var(--body); padding: 12px 8px 12px 22px; letter-spacing: .01em; }
+#quickinput::placeholder { color: var(--ink-faint); }
+#quickrow button {
+  width: 42px; height: 42px; background: rgba(255,255,255,.03); color: var(--ink-dim);
+  box-shadow: inset 0 0 0 1px var(--edge-2);
+}
+#quickrow button:hover { background: rgba(var(--accent-rgb), .1); color: var(--brass); box-shadow: inset 0 0 0 1px var(--brass-deep); }
+#quickrow button.on {
+  background: linear-gradient(180deg, rgb(var(--accent-rgb)), rgba(var(--accent-rgb), .78));
+  color: #0b0a08; box-shadow: 0 0 22px rgba(var(--accent-rgb), .35), inset 0 1px 0 rgba(255,255,255,.35);
+}
+#quickrow button.warn { background: var(--rust); color: var(--rust-ink); box-shadow: inset 0 0 0 1px var(--rust-edge); }
+
+/* the stage yields to the drawer so the orb and caption stay centred in the
+   visible half, not behind the panel. Only when there is room for both. */
+body:not(.hud) .orb-col { transition: padding-right .32s cubic-bezier(.2,.8,.2,1); }
+@media (min-width: 1100px) {
+  body.drawer:not(.hud) .orb-col { padding-right: min(478px, 42vw); }
+}
+
+/* drawer */
+body:not(.hud) .side {
+  top: 18px; right: 18px; bottom: 18px; width: min(450px, calc(100% - 36px));
+  background: linear-gradient(180deg, rgba(22,20,18,.93), rgba(11,10,9,.95));
+  border: 1px solid var(--edge); border-radius: 18px; padding: 18px;
+  box-shadow: 0 30px 90px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,236,196,.06);
+}
+#tabs { background: transparent; padding: 0; gap: 22px; border-bottom: 1px solid var(--edge-2); border-radius: 0; }
+#tabs button {
+  flex: none; border-radius: 0; padding: 8px 2px 11px; margin-bottom: -1px;
+  font: 600 20px var(--disp); letter-spacing: .03em; color: var(--ink-faint);
+  border-bottom: 1px solid transparent; background: transparent !important;
+}
+#tabs button:hover { color: var(--ink-dim); }
+#tabs button.on { color: var(--ink); border-bottom-color: var(--brass); }
+body:not(.hud) section {
+  background: linear-gradient(180deg, rgba(255,240,210,.035), rgba(255,240,210,.012));
+  border: 1px solid var(--edge-2); border-radius: 14px; padding: 16px;
+}
+body:not(.hud) section h2 {
+  font: 600 18px var(--disp); letter-spacing: .02em; color: var(--ink); text-transform: none;
+  padding-bottom: 10px; margin-bottom: 14px; border-bottom: 1px solid var(--edge-2);
+}
+body:not(.hud) section h2 .mini { font: 400 10px var(--mono); letter-spacing: .08em; color: var(--ink-faint); }
+
+/* conversation */
+.msg { font-size: 14px; line-height: 1.58; }
+.msg .who { font: 600 9.5px var(--body); letter-spacing: .26em; color: var(--ink-faint); }
+.msg.assistant .who { color: rgba(var(--accent-rgb), .85); }
+.msg.assistant .body { font: 500 17px/1.5 var(--disp); color: var(--ink); }
+.msg.user .body { color: var(--ink-dim); }
+.msg .badge { border-color: var(--edge); color: var(--ink-faint); letter-spacing: .08em; }
+#chatrow input, .setrow select, .setrow input[type=text], .setrow input[type=password] {
+  background: rgba(0,0,0,.35); border-color: var(--edge-2); border-radius: 10px; color: var(--ink);
+}
+#chatrow input:focus, .setrow select:focus, .setrow input[type=text]:focus, .setrow input[type=password]:focus {
+  border-color: var(--brass-deep); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .1);
+}
+
+/* buttons */
+#chatsend, #btnSave {
+  background: linear-gradient(180deg, rgb(var(--accent-rgb)), rgba(var(--accent-rgb), .8)); color: #0b0a08;
+  border: 0; border-radius: 10px; font: 700 11px var(--body); letter-spacing: .14em; text-transform: uppercase;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 6px 18px rgba(var(--accent-rgb), .18);
+}
+#btnSaveKey, #btnTestAudio, #btnRefreshP4, #btnAddWatcher {
+  background: rgba(255,255,255,.025); border: 1px solid var(--edge); color: var(--ink-dim);
+  border-radius: 10px; font: 600 11px var(--body); letter-spacing: .1em; text-transform: uppercase; padding: 9px 15px; cursor: pointer;
+}
+#btnSaveKey:hover, #btnTestAudio:hover, #btnRefreshP4:hover, #btnAddWatcher:hover {
+  color: var(--brass); border-color: var(--brass-deep); background: rgba(var(--accent-rgb), .06);
+}
+.msg.write-confirm .wc-actions button[data-act="yes"] { color: var(--brass); border-color: var(--brass-deep); background: rgba(var(--accent-rgb), .06); }
+
+/* cards and data */
+.card, .skill-card, .audit-strip, #audioDebug { background: rgba(0,0,0,.28); border-color: var(--edge-2); }
+.setrow label { font-size: 12px; color: var(--ink-faint); letter-spacing: .02em; }
+.setrow label.check { width: auto; flex: 1; color: var(--ink-dim); font-size: 12px; }
+.setrow .val, .audit-strip .row .etype { color: var(--brass); }
+.tier-status .dot.live, footer .dot.on { background: var(--brass); box-shadow: 0 0 8px rgba(var(--accent-rgb), .6); }
+::selection { background: rgba(var(--accent-rgb), .3); }
+*::-webkit-scrollbar-thumb { background: rgba(232,208,160,.14); }
+*::-webkit-scrollbar-thumb:hover { background: rgba(232,208,160,.28); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+@media (max-width: 880px) {
+  body:not(.hud) header { padding: 20px 20px 0; }
+  body:not(.hud) header h1 { font-size: 19px; letter-spacing: .34em; }
+  body:not(.hud) header h1::before, body:not(.hud) header h1::after { width: 14px; }
+  #caption { font-size: 20px; }
+  body:not(.hud)::after { inset: 6px; }
+  /* the drawer becomes a full sheet rather than a half panel over the orb */
+  body:not(.hud) .side { left: 12px; right: 12px; top: 12px; bottom: 12px; width: auto; }
+}
+/* ---------------- JARVIS / SIGNAL: voice-first workspace ---------------- */
+:root {
+  --bg:#090d15; --panel:#101724; --panel-2:#141d2b; --inset:#0b111b;
+  --edge:rgba(177,198,229,.16); --edge-2:rgba(177,198,229,.09);
+  --ink:#f2f6ff; --ink-title:#f2f6ff; --ink-dim:#abb9cd; --ink-faint:#77879e;
+  --accent-rgb:112,157,255; --disp:var(--body);
+}
+body:not(.hud) { background:#090d15; overflow:hidden; }
+body:not(.hud)::before { background:radial-gradient(ellipse at 22% 45%,rgba(42,79,136,.24),transparent 47%),radial-gradient(ellipse at 90% 0%,rgba(42,69,115,.12),transparent 36%); }
+body:not(.hud)::after { display:none; }
+body:not(.hud) #app { height:100dvh; }
+body:not(.hud) header { height:78px; flex:none; padding:0 42px; gap:13px; border-bottom:1px solid var(--edge-2); }
+.brand-mark { width:35px;height:35px;display:grid;place-items:center;border:1px solid rgba(140,178,255,.44);border-radius:11px;transform:rotate(45deg);background:rgba(110,153,246,.08); }
+.brand-mark span { width:12px;height:12px;border:1px solid #a4c2ff;border-radius:50%;box-shadow:0 0 12px #779eff; }
+.brand-copy { display:flex;flex-direction:column;gap:4px;margin-left:6px; }
+body:not(.hud) header h1 { font:700 15px/1 var(--body);letter-spacing:.22em;text-shadow:none; }
+body:not(.hud) header h1::before, body:not(.hud) header h1::after { display:none; }
+.brand-copy > span { font:500 9px var(--mono);letter-spacing:.12em;color:var(--ink-faint); }
+body:not(.hud) #conn { margin-left:auto;letter-spacing:.1em;font:500 10px var(--mono);white-space:nowrap; }
+body:not(.hud) #conn.ok::before { background:#78dab2;box-shadow:0 0 10px rgba(120,218,178,.45); }
+body:not(.hud) #btnPanel { width:40px;height:40px;border-radius:12px;background:#141d2a;border-color:var(--edge-2); }
+body:not(.hud) #btnPanel:hover, body:not(.hud) #btnPanel[aria-expanded="true"] { color:var(--ink);background:#202d41;border-color:var(--edge); }
+body:not(.hud) main { display:grid;grid-template-columns:minmax(0,1fr) minmax(360px, 44%);gap:20px; padding:20px 24px 24px; overflow:hidden; }
+body:not(.hud) .orb-col { position:relative;min-width:0;min-height:0;padding:36px 38px 25px;justify-content:initial;align-items:stretch;border:1px solid var(--edge-2);border-radius:22px;background:linear-gradient(145deg,rgba(25,37,55,.6),rgba(10,16,26,.7) 58%);overflow:hidden;transition:none; }
+@media (min-width:1100px) { body.drawer:not(.hud) .orb-col { padding-right:38px; } }
+body:not(.hud) .orb-col::before { content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 52%,rgba(var(--accent-rgb),.10),transparent 48%); }
+.stage-heading,.stage-bottom,.model-control { position:relative;z-index:1; }
+.eyebrow { color:#90a7c6;font:600 10px var(--mono);letter-spacing:.15em; }
+.stage-heading h2 { margin-top:17px;color:var(--ink);font:500 clamp(28px,3.1vw,46px)/1.1 var(--body);letter-spacing:-.055em; }
+.stage-heading h2 em { font-style:normal;color:#9bbcff; }
+.stage-heading p { margin-top:13px;color:var(--ink-faint);font-size:13px;line-height:1.55;max-width:270px; }
+body:not(.hud) .canvas-card { flex:1;width:100%;min-height:120px; }
+body:not(.hud) canvas { position:absolute;inset:0; }
+.stage-bottom { display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--edge-2);padding-top:18px; }
+.state-line { display:flex;align-items:center;gap:9px; }
+.state-dot { width:7px;height:7px;border-radius:50%;background:rgb(var(--accent-rgb));box-shadow:0 0 12px rgba(var(--accent-rgb),.7); }
+#orbstate { display:block;margin:0;padding:0;font:600 11px var(--mono);letter-spacing:.08em;color:var(--ink); }
+#orbstate::before,#orbstate::after { display:none; }
+.stage-hint { font-size:11px;color:var(--ink-faint);margin-right:112px; }
+body:not(.hud) #caption,body:not(.hud) #quickinput { display:none; }
+body:not(.hud) #quickrow { position:absolute;z-index:2;right:34px;bottom:58px;width:auto;margin:0;padding:0;border:0;background:none;box-shadow:none;backdrop-filter:none; }
+body:not(.hud) #quickrow button { width:43px;height:43px;background:#1a2638;box-shadow:inset 0 0 0 1px var(--edge);color:#dce8fa; }
+body:not(.hud) #quickrow button:hover { background:#273a57;color:white; }
+body:not(.hud) #quickrow button.on { background:#a3c0ff;color:#0b1423; }
+body:not(.hud) #quickrow button.warn { background:var(--rust);color:var(--rust-ink); }
+.model-control { display:flex;align-items:center;gap:10px;margin-top:14px;min-width:0; }
+.model-control label { font:500 9px var(--mono);letter-spacing:.12em;color:var(--ink-faint); }
+.model-control select { max-width:calc(100% - 50px);min-width:0;padding:5px 23px 5px 0;border:0;color:var(--ink-dim);background:transparent;font:500 11px var(--body);cursor:pointer; }
+.model-control select option { color:var(--ink);background:#151e2c; }
+body:not(.hud) #secChat { display:flex;flex-direction:column;min-width:0;min-height:0;padding:0;border:1px solid var(--edge-2);border-radius:22px;background:linear-gradient(160deg,rgba(21,30,44,.98),rgba(13,20,31,.98));overflow:hidden; }
+.chat-heading { display:flex;align-items:center;justify-content:space-between;gap:14px;padding:29px 30px 22px;border-bottom:1px solid var(--edge-2); }
+body:not(.hud) #secChat h2 { margin:7px 0 0;padding:0;border:0;color:var(--ink);font:600 20px var(--body);letter-spacing:-.03em; }
+#engineNote { max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-faint);font:500 10px var(--mono); }
+body:not(.hud) #secChat #chat { flex:1;min-height:0;max-height:none;overflow-y:auto;padding:24px 30px;gap:24px; }
+#chathint { display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100%;text-align:center;color:var(--ink-faint); }
+.hint-icon { display:grid;place-items:center;width:52px;height:52px;margin-bottom:19px;border-radius:17px;background:rgba(118,157,236,.1);border:1px solid rgba(140,178,255,.15);color:#a5c2ff;font-size:25px; }
+#chathint strong { color:var(--ink);font:600 18px var(--body);letter-spacing:-.02em; }
+#chathint p { max-width:260px;margin-top:8px;font:400 13px/1.6 var(--body); }
+.command-hint { display:flex;align-items:center;justify-content:center;gap:7px;flex-wrap:wrap;margin-top:24px; }
+.command-hint span { width:100%;margin-bottom:3px;font:500 9px var(--mono);letter-spacing:.1em;color:var(--ink-faint); }
+.command-hint code,.composer-meta code { color:#adc5ef;font:500 10px var(--mono); }
+.command-hint code { padding:5px 7px;border:1px solid var(--edge-2);border-radius:6px;background:rgba(255,255,255,.025); }
+.msg { font:400 14px/1.65 var(--body); }
+.msg .who { margin-bottom:8px;font:600 10px var(--body);letter-spacing:.09em;color:var(--ink-faint); }
+.msg.assistant .who { color:#a9c4ff; }
+.msg.assistant .body,.msg.user .body { color:var(--ink);font:400 14px/1.7 var(--body);white-space:pre-wrap;overflow-wrap:anywhere; }
+.msg.user .body { color:#d8e2f1; }
+.composer-wrap { padding:16px 22px 18px;border-top:1px solid var(--edge-2); }
+#chatrow { margin:0;gap:8px;padding:6px;border:1px solid var(--edge);border-radius:13px;background:#0c1420; }
+#chatrow:focus-within { border-color:rgba(147,183,255,.65);box-shadow:0 0 0 3px rgba(112,157,255,.1); }
+#chatrow input { border:0!important;box-shadow:none!important;background:transparent!important;padding:10px 11px;font:400 14px var(--body); }
+#chatrow input:focus-visible { outline:0; }
+#chatsend { border-radius:9px;background:#adc6ff;color:#0b162b;box-shadow:none;padding:0 14px;font:700 11px var(--body);letter-spacing:0;text-transform:none; }
+.composer-meta { display:flex;justify-content:space-between;gap:8px;padding:11px 2px 0;color:var(--ink-faint);font:400 10px var(--body); }
+.composer-meta code { font-size:9px; }
+body:not(.hud) .side { top:0;right:0;bottom:0;width:min(480px,100%);padding:23px;background:#111a28;border:1px solid var(--edge);border-radius:20px; }
+body.adv .side > section:not(#secChat) { display:block; }
+body:not(.hud) .side section { background:rgba(255,255,255,.025);border-color:var(--edge-2); }
+body:not(.hud) .side section h2 { font:600 15px var(--body); }
+#tabs { gap:20px; }
+#tabs button { font:600 13px var(--body); }
+#tabs button.on { border-bottom-color:#a6c1ff; }
+body:not(.hud) footer { bottom:3px; }
+body.hud .brand-mark,body.hud .brand-copy,body.hud .stage-heading,body.hud .stage-bottom,body.hud .model-control,body.hud #secChat { display:none; }
+@media (max-width:900px) {
+ body:not(.hud) header { height:65px;padding:0 22px; }
+ body:not(.hud) main { grid-template-columns:minmax(0,1fr) minmax(320px,48%);gap:12px;padding:12px; }
+ body:not(.hud) .orb-col { padding:26px 24px 20px; }
+ body:not(.hud) #quickrow { right:22px;bottom:54px; }
+ .chat-heading { padding:24px 22px 18px; }
+ body:not(.hud) #secChat #chat { padding:20px 22px; }
+}
+@media (max-width:700px) {
+ body:not(.hud) { overflow:auto; }
+ body:not(.hud) #app { height:auto;min-height:100dvh; }
+ body:not(.hud) main { display:flex;flex-direction:column;overflow:visible; }
+ body:not(.hud) .orb-col { flex:none;min-height:400px;height:48dvh;max-height:460px;padding:22px; }
+ .stage-heading h2 { font-size:28px;margin-top:10px; }
+ .stage-heading p { margin-top:8px;font-size:12px; }
+ body:not(.hud) .canvas-card { min-height:90px; }
+ body:not(.hud) #secChat { flex:none;height:480px; }
+ body:not(.hud) .side { position:fixed;inset:10px;width:auto; }
+ body:not(.hud) footer { position:static;padding:3px 10px; }
+ .composer-meta span:last-child { display:none; }
+ .stage-hint { display:none; }
+}
+@media (max-height:650px) and (min-width:701px) {
+ body:not(.hud) header { height:60px; }
+ body:not(.hud) .orb-col { padding-top:22px; }
+ .stage-heading h2 { font-size:28px;margin-top:9px; }
+ .stage-heading p { margin-top:6px; }
+}
+/* Responsive workspace: controls remain in the layout, never over the status. */
+body:not(.hud) #btnPanel, .brand-mark { flex-shrink:0; }
+body:not(.hud) .stage-bottom { gap:12px;flex-shrink:0; }
+body:not(.hud) .stage-heading,body:not(.hud) .model-control { flex-shrink:0; }
+body:not(.hud) #chathint { justify-content:safe center; }
+body:not(.hud) .hint-icon { flex-shrink:0; }
+.stage-status { display:flex;align-items:center;gap:14px;min-width:0; }
+.stage-hint { margin:0; }
+body:not(.hud) #quickrow { position:static;flex:none;width:auto;margin:0; }
+@media (max-width:1100px) { .stage-hint { display:none; } }
+@media (max-width:700px) {
+ body:not(.hud) main { gap:12px; }
+ body:not(.hud) .orb-col { height:clamp(410px, 54dvh, 470px);min-height:410px; }
+ body:not(.hud) #secChat { min-height:420px;height:max(420px, 58dvh); }
+ body:not(.hud) #quickrow { position:static; }
+ body:not(.hud) .side { left:10px;right:10px;top:10px;bottom:10px; }
+ body:not(.hud) footer { flex:none; }
+}
+@media (max-width:380px) {
+ body:not(.hud) header { padding-inline:15px;gap:9px; }
+ .brand-copy { margin-left:3px; }
+ .brand-copy > span { display:none; }
+ body:not(.hud) .orb-col { padding:20px 18px; }
+ .chat-heading { padding-inline:18px; }
+ body:not(.hud) #secChat #chat { padding-inline:18px; }
+ .composer-wrap { padding-inline:14px; }
+ body:not(.hud) .side { padding:16px; }
+ .setrow { flex-wrap:wrap; }
+ .setrow label:not(.check) { width:100%; }
+ .setrow select,.setrow input[type=text],.setrow input[type=password] { width:100%; }
+}
+/* In a short landscape window let the workspace scroll instead of clipping
+   status, mic controls, the composer, or the orb. */
+@media (max-height:520px) and (min-width:701px) {
+ body:not(.hud) { overflow:auto; }
+ body:not(.hud) #app { height:auto;min-height:100dvh; }
+ body:not(.hud) main { flex:none;overflow:visible;min-height:440px; }
+ body:not(.hud) .orb-col,body:not(.hud) #secChat { min-height:420px; }
+ body:not(.hud) .side { position:fixed;top:10px;right:10px;bottom:10px; }
+ body:not(.hud) footer { position:static;padding:3px 10px; }
+}
 </style>
 </head>
 <body>
 <div id="app">
 <header>
-  <h1>JARVIS</h1>
+  <div class="brand-mark" aria-hidden="true"><span></span></div>
+  <div class="brand-copy"><h1>JARVIS</h1><span>PERSONAL INTELLIGENCE</span></div>
   <span id="conn">CONNECTING</span>
-  <button id="btnPanel" title="Details &amp; settings" aria-label="Open panel" aria-expanded="false">
+  <button id="btnPanel" title="Open settings and diagnostics" aria-label="Open settings and diagnostics" aria-expanded="false">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
   </button>
 </header>
 <main>
   <div class="orb-col">
+    <div class="stage-heading"><span class="eyebrow">YOUR PERSONAL ASSISTANT</span><h2>Here when<br>you need <em>me.</em></h2><p>Think out loud, ask anything, or pick up where you left off.</p></div>
     <div id="hudbar">
       <span id="hudgrip" title="Drag to move"></span>
       <span id="hudstate">STANDBY</span>
@@ -512,16 +834,16 @@ body.hud #hudnote.show { opacity: 1; }
     <div class="canvas-card">
       <canvas id="cv"></canvas>
     </div>
-    <div id="orbstate">Standby</div>
-    <div id="caption"></div>
+    <div class="stage-bottom"><div class="stage-status"><div class="state-line"><span class="state-dot"></span><span id="orbstate" role="status">Standby</span></div><span class="stage-hint">Say “hey jarvis” to begin</span></div>
+    <div id="caption" aria-live="polite"></div>
     <div id="quickrow">
-      <input id="quickinput" placeholder="Ask JARVIS anything…" autocomplete="off">
+      <input id="quickinput" placeholder="Ask JARVIS anything…  (/3.5 /lite /agnes /auto)" autocomplete="off">
     <div id="controls">
-      <button id="btnListen" title="Manual listen (bypasses wake word)">
+      <button id="btnListen" title="Manual listen (bypasses wake word)" aria-label="Start or stop listening" aria-pressed="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
         <span>Listen</span>
       </button>
-      <button id="btnMute" title="Mute the agent (grey state)">
+      <button id="btnMute" title="Mute the microphone" aria-label="Mute microphone" aria-pressed="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10v4h4l5 4V6l-5 4H4z"/><path d="M16.5 9.5 21 14M21 9.5 16.5 14"/></svg>
         <span>Mute</span>
       </button>
@@ -531,22 +853,24 @@ body.hud #hudnote.show { opacity: 1; }
       </button>
     </div>
     </div>
+    </div>
+    <div class="model-control"><label for="brainPick">MODEL</label><select id="brainPick" onchange="pickBrain(this.value)" aria-label="Choose model"><option>Loading…</option></select></div>
   </div>
+  <section id="secChat" aria-label="Conversation">
+    <div class="chat-heading"><div><span class="eyebrow">YOUR SPACE</span><h2>Conversation</h2></div><span class="mini" id="engineNote">Ready when you are</span></div>
+    <div id="chat" role="log" aria-live="polite" aria-label="Conversation transcript"><div id="chathint"><div class="hint-icon" aria-hidden="true">✳</div><strong>What’s on your mind?</strong><p>Start a conversation by typing below or speaking to JARVIS.</p><div class="command-hint"><span>QUICK SWITCH</span><code>/3.5</code><code>/lite</code><code>/agnes</code><code>/auto</code></div></div></div>
+    <div class="composer-wrap"><div id="chatrow">
+      <input id="chatinput" aria-label="Message JARVIS" placeholder="Message JARVIS…" autocomplete="off">
+      <button id="chatsend" aria-label="Send message">Send
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </div><div class="composer-meta"><span>Enter to send</span><span>Model shortcuts: <code>/3.5</code> <code>/lite</code> <code>/agnes</code> <code>/auto</code></span></div></div>
+  </section>
   <div class="side">
     <div id="tabs" role="tablist">
-      <button id="tabChat" class="on" role="tab">Chat</button>
-      <button id="tabAdv" role="tab">Advanced</button>
+      <button id="tabChat" role="tab">← Conversation</button>
+      <button id="tabAdv" class="on" role="tab">Advanced</button>
     </div>
-    <section id="secChat">
-      <h2>Conversation <span class="mini" id="engineNote">—</span></h2>
-      <div id="chat"><div id="chathint">Say "hey jarvis", tap Listen, or type below.</div></div>
-      <div id="chatrow">
-        <input id="chatinput" placeholder="Ask something…" autocomplete="off">
-        <button id="chatsend">Send
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-        </button>
-      </div>
-    </section>
     <section>
       <h2>Trace · Inspect <span class="mini">per-step latency + raw payload</span></h2>
       <div id="trace"><div id="traceempty">No turns yet.</div></div>
@@ -556,8 +880,8 @@ body.hud #hudnote.show { opacity: 1; }
       <div id="audioDebug">audio: not started</div>
       <div id="micDiag" class="hint" role="status" aria-live="polite">mic diagnostics: waiting for backend</div>
       <div id="agentNote" class="hint">agent: not connected</div>
-      <div class="setrow"><label>Local model</label>
-        <select id="sLocal"></select></div>
+      <div class="setrow"><label>Hosted brains</label>
+        <span class="hint">Gemini 3.5 Flash → Gemini 3.5 Lite → Agnes; choose a model on the main screen.</span></div>
       <div class="setrow"><label>TTS voice</label>
         <select id="sVoice">
           <option value="af_heart">af_heart (feminine)</option>
@@ -571,6 +895,27 @@ body.hud #hudnote.show { opacity: 1; }
       <div class="setrow"><label>Pause patience (VAD)</label>
         <input type="range" id="sVadTail" min="6" max="25" step="1" value="12">
         <span class="val" id="sVadTailVal">1.2s</span></div>
+      <div class="setrow"><label>Voice source</label>
+        <select id="sVoiceBackend">
+          <option value="auto">Automatic — hosted when a Gemini key exists</option>
+          <option value="gemini">Hosted (Gemini TTS, fastest)</option>
+          <option value="local">Local only (offline Kokoro)</option>
+        </select></div>
+      <div id="voiceNote" class="hint">voice: checking…</div>
+      <div class="setrow"><label>Voice pacing</label>
+        <select id="sVoicePacing">
+          <option value="quick">Quick start (small pauses between sentences)</option>
+          <option value="smooth">No pauses (starts after the full reply)</option>
+        </select></div>
+      <div class="setrow"><label>Spoken length</label>
+        <select id="sSpeakLen">
+          <option value="0">Speak the whole reply</option>
+          <option value="320">Speak about 3 sentences, rest on screen</option>
+          <option value="160">Speak about 1 sentence, rest on screen</option>
+        </select></div>
+      <div class="setrow"><label>Speech rate</label>
+        <input type="range" id="sTtsSpeed" min="90" max="130" step="5" value="100">
+        <span class="val" id="sTtsSpeedVal">1.00×</span></div>
       <div class="setrow"><label>Agnes base URL</label>
         <input type="text" id="sCloudUrl"></div>
       <div class="setrow"><label>Agnes model</label>
@@ -594,6 +939,15 @@ body.hud #hudnote.show { opacity: 1; }
       </div>
     </section>
     <section>
+      <h2>File watchers <span class="mini" id="watcherNote">opt-in · local only</span></h2>
+      <p class="hint">Watch an approved folder for matching file changes. JARVIS only queues read-only tasks; existing files are not processed when you first add a watcher.</p>
+      <div class="setrow"><label for="watchRoot">Approved folder</label><input id="watchRoot" type="text" placeholder="C:\\Users\\you\\Documents\\notes"></div>
+      <div class="setrow"><label for="watchPattern">File pattern</label><input id="watchPattern" type="text" value="**/*.md" placeholder="**/*.md"></div>
+      <div class="setrow"><label for="watchInstruction">When a file changes</label><input id="watchInstruction" type="text" value="Summarize the changed file and its important points."></div>
+      <button id="btnAddWatcher" class="ctl">Add watcher</button>
+      <div id="watcherBox"><div class="hint">No file watchers configured.</div></div>
+    </section>
+    <section>
       <h2>Raised Issues <span class="mini" id="alertNote">proactive · §6.9</span></h2>
       <div id="alertBox"><div class="hint">Nothing raised yet.</div></div>
     </section>
@@ -611,7 +965,7 @@ body.hud #hudnote.show { opacity: 1; }
 <footer>
   <span><span class="dot" id="dotWs"></span><span id="wsNote">ws</span></span>
   <span id="stateNote">state: idle</span>
-  <span id="engineNote2">brain: —</span>
+  <span id="engineNote2">brain: loading…</span>
   <span id="errline"></span>
 </footer>
 </div>
@@ -620,6 +974,7 @@ body.hud #hudnote.show { opacity: 1; }
 "use strict";
 const HUD_MODE = new URLSearchParams(location.search).get("mode") === "hud";
 if (HUD_MODE) document.body.classList.add("hud");
+else document.body.classList.add("adv");
 function hudBridge(msg) {
   try {
     if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
@@ -643,7 +998,7 @@ function connect() {
   ws = new WebSocket(WS_URL);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { document.getElementById("conn").textContent = "LINK ACTIVE"; document.getElementById("conn").className = "ok"; setDot(true); if (!HUD_MODE) loadP4(); };
-  ws.onclose = () => { setDot(false); document.getElementById("conn").textContent = "RECONNECTING"; setTimeout(connect, reconnectMs); };
+  ws.onclose = () => { setDot(false); const conn = document.getElementById("conn"); conn.textContent = "RECONNECTING"; conn.className = ""; setTimeout(connect, reconnectMs); };
   ws.onmessage = (ev) => {
     if (typeof ev.data !== "string") { const u = new Uint8Array(ev.data); ttsBytes += u.length; ttsChunks.push(u); return; }
     handleOp(JSON.parse(ev.data));
@@ -680,12 +1035,64 @@ let ttsQueue = [];
 let ttsPlaying = false;
 let ttsStreamDone = false;
 let ttsBytes = 0;
+let ttsCurrentUrl = null;
+let ttsGeneration = 0;
+let ttsReplyId = null;
+let ttsPlaybackError = false;
+let ttsBackend = "";
+let voiceStatus = { backend: "unknown", hosted_available: false, cooldown_s: 0 };
+let primeTimer = null;
+/* Pre-roll only helps hosted synthesis: it prefetches several pieces, so a
+   short wait hides the gaps between them. Local Kokoro is synthesized one
+   piece at a time and cannot reliably queue a second piece inside this timer,
+   so waiting here would add a guaranteed delay before every local reply. */
+function scheduleStart(force) {
+  if (ttsPlaying || !ttsQueue.length) return;
+  if (force || ttsStreamDone || ttsBackend !== "gemini") { startPlayback(); return; }
+  if (!primeTimer) primeTimer = setTimeout(() => { primeTimer = null; startPlayback(); }, 1500);
+}
+function startPlayback() {
+  if (primeTimer) { clearTimeout(primeTimer); primeTimer = null; }
+  pumpQueue();
+}
+function beginTTS(id, backend) {
+  cancelTTS(false);
+  ttsReplyId = id || null;
+  ttsBackend = backend || "unknown";
+  ttsBytes = 0;
+  ttsPlaybackError = false;
+}
+function cancelTTS(interrupted = true) {
+  ttsGeneration++;
+  if (primeTimer) { clearTimeout(primeTimer); primeTimer = null; }
+  for (const url of ttsQueue) URL.revokeObjectURL(url);
+  ttsQueue = [];
+  ttsChunks.length = 0;
+  ttsStreamDone = false;
+  ttsPlaying = false;
+  if (audioEl) {
+    audioEl.onended = null;
+    audioEl.onerror = null;
+    audioEl.pause();
+    audioEl.removeAttribute("src");
+    audioEl.load();
+  }
+  if (ttsCurrentUrl) URL.revokeObjectURL(ttsCurrentUrl);
+  ttsCurrentUrl = null;
+  ttsReplyId = null;
+  ttsBackend = "";
+  speakingLevel = 0; spkBins.fill(0);
+  if (interrupted) audioDebug("listening — speech interrupted", true);
+}
 async function pumpQueue() {
   if (ttsPlaying || !ttsQueue.length) return;
   const url = ttsQueue.shift();
+  const generation = ttsGeneration;
+  ttsCurrentUrl = url;
   ttsPlaying = true;
-  const ac = await wakeAudio();
   try {
+    const ac = await wakeAudio();
+    if (generation !== ttsGeneration) { URL.revokeObjectURL(url); return; }
     if (!audioEl) audioEl = new Audio();
     if (!audioElSourced) {
       const mes = ac.createMediaElementSource(audioEl);
@@ -693,45 +1100,62 @@ async function pumpQueue() {
       mes.connect(analyser); analyser.connect(ac.destination);
       audioElSourced = true;
     }
+    const speed = Math.max(0.5, Math.min(1.5, Number(settings?.tts_speed) || 1));
     audioEl.src = url;
+    audioEl.playbackRate = 1 / speed;
     audioEl.onended = () => {
+      if (generation !== ttsGeneration) return;
       URL.revokeObjectURL(url);
+      if (ttsCurrentUrl === url) ttsCurrentUrl = null;
       ttsPlaying = false;
       if (ttsQueue.length) pumpQueue();
       else if (ttsStreamDone) endSpeech();
+      // The reply is not over: the next sentence is still being generated.
+      // Say so instead of leaving the orb silently mid-sentence.
+      else audioDebug("voice still generating\u2026", true);
     };
     audioEl.onerror = () => {
+      if (generation !== ttsGeneration) return;
+      ttsPlaybackError = true;
       URL.revokeObjectURL(url);
+      if (ttsCurrentUrl === url) ttsCurrentUrl = null;
       ttsPlaying = false;
       audioDebug("audio element failed: " + audioEl.error, false);
       if (ttsQueue.length) pumpQueue(); else if (ttsStreamDone) endSpeech();
     };
     await audioEl.play();
-    audioDebug("speaking (" + Math.round(ttsBytes / 1024) + " KB)", true);
+    audioDebug("speaking (" + Math.round(ttsBytes / 1024) + " KB · " + ttsBackend + ")", true);
   } catch (e) {
     URL.revokeObjectURL(url);
+    if (generation !== ttsGeneration) return;
+    if (ttsCurrentUrl === url) ttsCurrentUrl = null;
     ttsPlaying = false;
-    wsSend("playback_done");
-    showErr("no voice reply: " + e.message);
+    ttsPlaybackError = true;
+    showErr("Voice playback failed: " + e.message + ". The full reply is in chat.");
     audioDebug("play failed: " + e.message, false);
+    if (ttsQueue.length) pumpQueue();
+    else if (ttsStreamDone) endSpeech();
   }
 }
 function endSpeech() {
-  analyser = null; speakingLevel = 0; spkBins.fill(0);
+  speakingLevel = 0; spkBins.fill(0);
   ttsStreamDone = false;
-  wsSend("playback_done");
+  if (ttsPlaybackError) showErr("Some voice audio could not play. The full reply is in chat.");
+  wsSend("playback_done", { id: ttsReplyId });
+  ttsReplyId = null;
 }
 function flushSentence(index, ms) {
   if (!ttsChunks.length) return;
   const blob = new Blob(ttsChunks.splice(0), { type: "audio/wav" });
   if (!blob.size) return;
   ttsQueue.push(URL.createObjectURL(blob));
-  audioDebug("sentence " + (index + 1) + " ready in " + ms + " ms — speaking", true);
-  pumpQueue();
+  audioDebug("sentence " + (index + 1) + " ready in " + ms + " ms", true);
+  scheduleStart();
 }
 async function finishTTS() {
   ttsStreamDone = true;
   if (ttsChunks.length) flushSentence(-1, 0);
+  scheduleStart(true);
   if (!ttsQueue.length && !ttsPlaying) {
     if (!ttsBytes) { audioDebug("no audio received from speech service", false); }
     endSpeech();
@@ -767,6 +1191,7 @@ function showMicError(err) {
   const listen = document.getElementById("btnListen");
   if (listen) {
     listen.classList.remove("on");
+    listen.setAttribute("aria-pressed", "false");
     const label = listen.querySelector("span");
     if (label) label.textContent = "Listen";
   }
@@ -906,9 +1331,10 @@ function handleOp(m) {
     case "hello":
       settings = m.settings || {};
       wsClientId = m.client_id || null;
+      if (!HUD_MODE && Array.isArray(m.history) && m.history.length) restoreTranscript(m.history);
       fillSettings(settings);
       if (m.wake_diagnostic) updateMicDiagnostic(m.wake_diagnostic);
-      if (!HUD_MODE) loadModels();
+      if (!HUD_MODE) { loadBrain(); loadWatchers(); }
       if (m.tools) {
         document.getElementById("agentNote").textContent =
           "agent tools: " + m.tools.join(", ") +
@@ -944,8 +1370,23 @@ function handleOp(m) {
       markEditUndone(m.token, m.outcome);
       break;
     case "trace": renderTrace(m.trace); break;
+    case "tts_start": beginTTS(m.id, m.backend); break;
     case "tts_flush": flushSentence(m.index, m.ms); break;
-    case "tts_done": finishTTS(); break;
+    case "tts_done": if (!m.id || m.id === ttsReplyId) finishTTS(); break;
+    case "barge_in": cancelTTS(); break;
+    case "pressure": {
+      const note = m.state === "critical"
+        ? "LOW MEMORY — background work paused (stt in fast mode)"
+        : m.state === "warn"
+          ? "memory tight — eco mode: fast transcription, learning paused"
+          : "memory recovered — background work resumed";
+      const el = document.getElementById("errline");
+      if (el) el.textContent = note;
+      const diag = document.getElementById("micDiag");
+      if (diag) diag.textContent = note + (m.available_gb != null ? " · " + m.available_gb + " GB free" : "");
+      if (HUD_MODE) hudNote(note, 8000);
+      break;
+    }
     case "alert":
       addMsg("assistant", "Noticed: " + (m.alert && m.alert.text || ""), "proactive");
       if (HUD_MODE) hudNote("Noticed: " + (m.alert && m.alert.text || ""));
@@ -963,18 +1404,15 @@ function showErr(msg) {
   if (HUD_MODE) hudNote(msg);
   setTimeout(() => { el.textContent = ""; }, 6000);
 }
-function loadModels() {
-  fetch("/api/ollama-models").then(r => r.json()).then(d => {
-    const sel = document.getElementById("sLocal"); sel.innerHTML = "";
-    (d.models || []).forEach(nm => {
-      const o = document.createElement("option"); o.value = nm; o.textContent = nm; sel.appendChild(o);
-    });
-    sel.value = settings.local_model || sel.value;
-  }).catch(() => {});
-}
 function fillSettings(s) {
   settings = s;
   document.getElementById("sVoice").value = s.voice || "af_heart";
+  const vb = document.getElementById("sVoiceBackend");
+  if (vb) vb.value = s.voice_backend || "auto";
+  const vp = document.getElementById("sVoicePacing");
+  if (vp) vp.value = s.voice_pacing || "quick";
+  const sl = document.getElementById("sSpeakLen");
+  if (sl) sl.value = String(s.speak_max_chars ?? 0);
   document.getElementById("sWake").value = Math.round((s.wake_threshold ?? 0.4) * 100);
   document.getElementById("sWakeVal").textContent = (s.wake_threshold ?? 0.4).toFixed(2);
   const vadEl = document.getElementById("sVadTail");
@@ -982,13 +1420,18 @@ function fillSettings(s) {
     vadEl.value = Math.round((s.vad_tail_s ?? 1.2) * 10);
     document.getElementById("sVadTailVal").textContent = (s.vad_tail_s ?? 1.2).toFixed(1) + "s";
   }
+  const speedEl = document.getElementById("sTtsSpeed");
+  if (speedEl) {
+    speedEl.value = Math.round((s.tts_speed ?? 1.0) * 100);
+    document.getElementById("sTtsSpeedVal").textContent = (s.tts_speed ?? 1.0).toFixed(2) + "×";
+  }
   document.getElementById("sCloudUrl").value = s.cloud?.base_url || "";
   document.getElementById("sCloudModel").value = s.cloud?.model || "";
   document.getElementById("sTRead").value = s.tiers?.read || "free";
   document.getElementById("sTWrite").value = s.tiers?.write || "confirm";
   document.getElementById("sTDestroy").value = s.tiers?.destructive || "hard_gate";
   document.getElementById("sVisionConsent").checked = !!(s.vision && s.vision.cloud_consent);
-  document.getElementById("engineNote2").textContent = "brain: " + (s.local_model || "—");
+  loadBrain();
   renderTierStatus(s);
 }
 function renderTierStatus(s) {
@@ -1002,13 +1445,17 @@ function saveSettings() {
   const tiers = { read: sTRead.value, write: sTWrite.value, destructive: sTDestroy.value };
   const vision = { cloud_consent: document.getElementById("sVisionConsent").checked };
   wsSend("settings", {
-    local_model: sLocal.value, voice: sVoice.value,
+    voice: sVoice.value,
+    voice_backend: document.getElementById("sVoiceBackend") ? document.getElementById("sVoiceBackend").value : "auto",
+    voice_pacing: document.getElementById("sVoicePacing") ? document.getElementById("sVoicePacing").value : "quick",
+    speak_max_chars: document.getElementById("sSpeakLen") ? Number(document.getElementById("sSpeakLen").value) : 0,
     wake_threshold: Number(sWake.value) / 100,
     vad_tail_s: document.getElementById("sVadTail") ? Number(document.getElementById("sVadTail").value) / 10 : 1.2,
+    tts_speed: document.getElementById("sTtsSpeed") ? Number(document.getElementById("sTtsSpeed").value) / 100 : 1.0,
     tiers, vision,
     cloud: { base_url: sCloudUrl.value, model: sCloudModel.value },
   });
-  document.getElementById("engineNote2").textContent = "brain: " + sLocal.value;
+  loadBrain();
   renderTierStatus({ tiers });
   loadP4();
 }
@@ -1051,6 +1498,57 @@ function updateMicDiagnostic(d) {
     `${micChunkCount} chunks sent (${(micSampleCount / 16000).toFixed(1)}s) · ${sample}`;
   el.classList.toggle("bad", !micEnabled || (micChunkCount > 20 && serverChunks === 0));
 }
+
+async function watcherRequest(path, method = "GET", body = null) {
+  const options = { method, headers: { "X-Jarvis-Task-Token": window.__JARVIS_TASK_TOKEN || "" } };
+  if (body !== null) { options.headers["Content-Type"] = "application/json"; options.body = JSON.stringify(body); }
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || ("Request failed (" + response.status + ")"));
+  return data;
+}
+async function loadWatchers() {
+  const box = document.getElementById("watcherBox");
+  if (!box || HUD_MODE) return;
+  try {
+    const data = await watcherRequest("/api/watchers");
+    const items = data.watchers || [];
+    document.getElementById("watcherNote").textContent = items.length + " configured · local only";
+    box.replaceChildren();
+    if (!items.length) { box.innerHTML = '<div class="hint">No file watchers configured.</div>'; return; }
+    for (const watcher of items) {
+      const card = document.createElement("div"); card.className = "skill-card";
+      const title = document.createElement("div"); title.className = "head";
+      const name = document.createElement("b"); name.textContent = watcher.pattern;
+      const status = document.createElement("span"); status.className = "badge " + (watcher.enabled ? "approved" : "proposed");
+      status.textContent = watcher.enabled ? "active" : "paused";
+      title.append(name, status); card.appendChild(title);
+      const body = document.createElement("div"); body.className = "body";
+      const root = document.createElement("div"); root.className = "summary"; root.textContent = watcher.root;
+      const instruction = document.createElement("div"); instruction.className = "meta"; instruction.textContent = watcher.task_instruction;
+      body.append(root, instruction); card.appendChild(body);
+      const controls = document.createElement("div"); controls.className = "wc-actions";
+      const toggle = document.createElement("button"); toggle.className = "ctl"; toggle.textContent = watcher.enabled ? "Pause" : "Resume";
+      toggle.onclick = async () => { try { await watcherRequest("/api/watchers/" + encodeURIComponent(watcher.id) + "/" + (watcher.enabled ? "pause" : "resume"), "POST"); loadWatchers(); } catch (e) { showErr(e.message); } };
+      const remove = document.createElement("button"); remove.className = "ctl"; remove.textContent = "Remove";
+      remove.onclick = async () => { try { await watcherRequest("/api/watchers/" + encodeURIComponent(watcher.id) + "/remove", "POST"); loadWatchers(); } catch (e) { showErr(e.message); } };
+      controls.append(toggle, remove); card.appendChild(controls); box.appendChild(card);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="hint">File watchers unavailable: ' + e.message + '</div>';
+  }
+}
+document.getElementById("btnAddWatcher").onclick = async () => {
+  const button = document.getElementById("btnAddWatcher"); button.disabled = true;
+  try {
+    const root = document.getElementById("watchRoot").value.trim();
+    const pattern = document.getElementById("watchPattern").value.trim() || "**/*";
+    const task_instruction = document.getElementById("watchInstruction").value.trim();
+    await watcherRequest("/api/watchers", "POST", { root, pattern, task_instruction });
+    loadWatchers();
+  } catch (e) { showErr(e.message); }
+  finally { button.disabled = false; }
+};
 
 function renderAlerts(data) {
   const box = document.getElementById("alertBox");
@@ -1152,6 +1650,7 @@ function renderWriteConfirm(pw) {
     wsSend("confirm_write", { token: pw.token, approved: true });
   card.querySelector('[data-act="no"]').onclick = () =>
     wsSend("confirm_write", { token: pw.token, approved: false });
+  const hint = document.getElementById("chathint"); if (hint) hint.remove();
   chat.appendChild(card); chat.scrollTop = chat.scrollHeight;
 }
 function resolveWriteCard(token, approved, outcome) {
@@ -1186,6 +1685,7 @@ function renderEditConfirm(pe) {
     (pe.diff || "(no diff)") + (pe.diff_truncated ? "\n… diff truncated" : "");
   card.querySelector('[data-act="no"]').onclick = () =>
     wsSend("confirm_edit", { token: pe.token, approved: false });
+  const hint = document.getElementById("chathint"); if (hint) hint.remove();
   chat.appendChild(card); chat.scrollTop = chat.scrollHeight;
 }
 function resolveEditCard(token, approved, outcome) {
@@ -1232,6 +1732,31 @@ function addMsg(role, text, engine, isError) {
   const chat = document.getElementById("chat"); chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
 }
+function restoreTranscript(items) {
+  // The panel is empty because the window is new, not because she forgot: play
+  // back what the store holds, dimmed, so closing and reopening is not amnesia.
+  const chat = document.getElementById("chat");
+  if (!chat || chat.querySelector(".msg")) return;
+  const hint = document.getElementById("chathint");
+  if (hint && hint.parentNode) hint.remove();
+  let when = "";
+  try {
+    when = new Date(items[0].ts * 1000).toLocaleString([],
+      { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch (e) { when = ""; }
+  const note = document.createElement("div");
+  note.className = "msg resume";
+  note.textContent = "carried over from memory" + (when ? " — since " + when : "")
+    + " (" + items.length + " turn" + (items.length === 1 ? "" : "s") + ")";
+  chat.appendChild(note);
+  for (const t of items) {
+    addMsg(t.role === "user" ? "user" : "assistant", t.text, t.engine);
+    const last = chat.lastElementChild;
+    if (last) last.classList.add("past");
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+
 function sendTyped(force, id) {
   const inp = document.getElementById(id || "chatinput");
   const t = inp.value.trim(); if (!t) return; inp.value = "";
@@ -1243,19 +1768,15 @@ document.getElementById("btnPanel").onclick = () => {
   const on = document.body.classList.toggle("drawer");
   document.getElementById("btnPanel").setAttribute("aria-expanded", on);
 };
-function setTab(adv) {
-  document.body.classList.toggle("adv", adv);
-  document.getElementById("tabChat").classList.toggle("on", !adv);
-  document.getElementById("tabAdv").classList.toggle("on", adv);
-}
-document.getElementById("tabChat").onclick = () => setTab(false);
-document.getElementById("tabAdv").onclick = () => setTab(true);
+document.getElementById("tabChat").onclick = () => document.getElementById("btnPanel").click();
 addEventListener("keydown", e => { if (e.key === "Escape" && document.body.classList.contains("drawer")) document.getElementById("btnPanel").click(); });
 document.getElementById("chatsend").onclick = () => sendTyped(false);
 document.getElementById("chatinput").addEventListener("keydown", e => { if (e.key === "Enter") sendTyped(false); });
 document.getElementById("sWake").oninput = e => document.getElementById("sWakeVal").textContent = (e.target.value / 100).toFixed(2);
 const vadInp = document.getElementById("sVadTail");
 if (vadInp) vadInp.oninput = e => document.getElementById("sVadTailVal").textContent = (e.target.value / 10).toFixed(1) + "s";
+const speedInp = document.getElementById("sTtsSpeed");
+if (speedInp) speedInp.oninput = e => document.getElementById("sTtsSpeedVal").textContent = (e.target.value / 100).toFixed(2) + "×";
 document.getElementById("btnSave").onclick = saveSettings;
 document.getElementById("btnSaveKey").onclick = () => {
   const k = document.getElementById("sCloudKey").value.trim();
@@ -1295,12 +1816,14 @@ function renderTrace(trace) {
 /* ---------------------------------------------------------------- controls */
 document.getElementById("btnListen").onclick = function () {
   const on = this.classList.toggle("on");
+  this.setAttribute("aria-pressed", String(on));
   this.querySelector("span").textContent = on ? "Listening…" : "Listen";
   wsSend(on ? "start" : "stop");
   if (on) this.blur();
 };
 document.getElementById("btnMute").onclick = function () {
   const on = this.classList.toggle("warn");
+  this.setAttribute("aria-pressed", String(on));
   this.querySelector("span").textContent = on ? "Muted" : "Mute";
   if (micStream) {
     micStream.getAudioTracks().forEach(t => { t.enabled = !on; });
@@ -1329,12 +1852,12 @@ const DPR = Math.min(2, window.devicePixelRatio || 1);
 let W = 440, H = 460, CX = W / 2, CY = H / 2, R = 100;
 function fitCanvas() {
   const box = cv.parentElement.getBoundingClientRect();
-  W = Math.max(200, Math.round(box.width)); H = Math.max(200, Math.round(box.height));
+  W = Math.max(1, Math.round(box.width)); H = Math.max(1, Math.round(box.height));
   cv.width = W * DPR; cv.height = H * DPR;
   cv.style.width = W + "px"; cv.style.height = H + "px";
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   CX = W / 2; CY = H / 2;
-  R = Math.max(60, Math.min(W * 0.27, H * 0.30, 190));
+  R = Math.max(1, Math.min(W * 0.27, H * (HUD_MODE ? 0.30 : 0.27), 190));
 }
 fitCanvas();
 addEventListener("resize", fitCanvas);
@@ -1378,11 +1901,11 @@ cv.addEventListener("wheel", e => { e.preventDefault(); zoom = Math.max(0.7, Mat
 /* Cool-to-warm state colour: idle periwinkle, listening teal, thinking violet,
    speaking amber, muted grey. Values ease toward the target each frame. */
 const TARGETS = {
-  idle:      { rgb: [140, 170, 255], hot: [226, 236, 255], dim: 1,    auto: 0.12, spin: 0.06, label: "STANDBY" },
-  listening: { rgb: [70, 214, 200],  hot: [205, 255, 246], dim: 1,    auto: 0.25, spin: 0.15, label: "LISTENING" },
-  thinking:  { rgb: [168, 124, 255], hot: [232, 214, 255], dim: 1,    auto: 1.4,  spin: 0.9,  label: "PROCESSING" },
-  speaking:  { rgb: [255, 164, 104], hot: [255, 226, 194], dim: 1,    auto: 0.4,  spin: 0.2,  label: "SPEAKING" },
-  muted:     { rgb: [104, 108, 120], hot: [160, 164, 176], dim: 0.4,  auto: 0,    spin: 0,    label: "OFFLINE" },
+  idle:      { rgb: [112, 157, 255], hot: [220, 233, 255], dim: 1,    auto: 0.12, spin: 0.06, label: "STANDBY" },
+  listening: { rgb: [112, 200, 184], hot: [214, 255, 244], dim: 1,    auto: 0.25, spin: 0.15, label: "LISTENING" },
+  thinking:  { rgb: [166, 142, 228], hot: [236, 224, 255], dim: 1,    auto: 1.4,  spin: 0.9,  label: "PROCESSING" },
+  speaking:  { rgb: [111, 195, 238], hot: [224, 250, 255], dim: 1,    auto: 0.4,  spin: 0.2,  label: "SPEAKING" },
+  muted:     { rgb: [112, 108, 100], hot: [168, 162, 152], dim: 0.4,  auto: 0,    spin: 0,    label: "OFFLINE" },
 };
 const cur = JSON.parse(JSON.stringify(TARGETS.idle));
 function lerpTo(dt) {
@@ -1593,6 +2116,35 @@ if (HUD_MODE) {
 /* The dedicated window starts its own mic; the HUD is handed ownership by
    the native shell, so those two never capture audio at the same time. */
 if (!HUD_MODE) startMic().catch(() => {});
+function loadBrain() {
+  fetch("/api/status").then(r => r.json()).then(st => {
+    const el = document.getElementById("voiceNote");
+    if (!el || !st.voice) return;
+    const v = st.voice;
+    voiceStatus = v;
+    el.textContent = "voice: last reply spoken with "
+      + (v.backend === "gemini" ? "the hosted Gemini voice" : "the local offline voice")
+      + (v.hosted_available ? " (hosted available)"
+         : v.cooldown_s > 0 ? " \u00b7 hosted resting " + Math.ceil(v.cooldown_s) + "s (quota)"
+         : " (hosted unavailable: no Gemini key)");
+  }).catch(() => {});
+  fetch("/api/model").then(r => r.json()).then(d => {
+    if (!d.tiers) return;
+    const sel = document.getElementById("brainPick");
+    const opts = [["auto", "Automatic · Flash → Lite → Agnes"]]
+      .concat(d.tiers.map(t => [t.id, t.label + (t.available ? "" : " (no key)") + (t.cooling_s > 0 ? " (cooling " + Math.ceil(t.cooling_s) + "s)" : "")]));
+    sel.innerHTML = "";
+    opts.forEach(([v, l]) => { const o = document.createElement("option"); o.value = v; o.textContent = l; sel.appendChild(o); });
+    sel.value = d.preference === "deep" ? "auto" : d.preference;
+    const lead = d.tiers.find(t => t.id === d.preference) || d.tiers[0];
+    document.getElementById("engineNote2").textContent = "brain: " + (d.preference === "auto" ? "auto ladder" : lead.label);
+  }).catch(() => {});
+}
+function pickBrain(v) {
+  fetch("/api/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pref: v }) })
+    .then(r => r.json()).then(() => loadBrain());
+}
+setTimeout(loadBrain, 1200);
 </script>
 </body>
 </html>

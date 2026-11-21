@@ -9,7 +9,7 @@ from jarvis.agent.routing import (
 def test_routine_question_stays_local():
     r = route_turn("what is my name", cloud_available=True)
     assert r.engine == "local"
-    assert "routine" in r.reason
+    assert "ladder" in r.reason
 
 
 def test_explicit_phrase_escalates():
@@ -17,21 +17,22 @@ def test_explicit_phrase_escalates():
     assert route_turn("use the cloud please", cloud_available=True).engine == "cloud"
 
 
-def test_complexity_heuristic_escalates_analytical_work():
+def test_analytical_work_stays_on_the_ladder():
+    """The complexity heuristic existed to dodge a weak local model. The
+    chain now LEADS with a flagship, so analytical work belongs there."""
     r = route_turn("compare the trade-offs of these two architectures", cloud_available=True)
-    assert r.engine == "cloud"
-    assert "complexity" in r.reason
+    assert r.engine == "local"
 
 
-def test_long_form_escalates():
+def test_long_form_stays_on_the_ladder():
     text = " ".join(f"word{i}" for i in range(70))
-    assert route_turn(text, cloud_available=True).engine == "cloud"
+    assert route_turn(text, cloud_available=True).engine == "local"
 
 
 def test_no_cloud_key_keeps_everything_local():
     r = route_turn("think hard and compare these designs", cloud_available=False)
     assert r.engine == "local"
-    assert "no cloud key" in r.reason
+    assert "ladder only" in r.reason
 
 
 def test_force_cloud_respected_when_key_exists():
@@ -68,17 +69,13 @@ def test_honest_tool_backed_negatives_are_not_retried():
     assert needs_retry(answer, words_in_question=9, used_tools=False)
 
 
-def test_measured_slow_local_model_routes_to_cloud():
-    r = route_turn("how do raindrops actually form", cloud_available=True,
-                   local_tokens_per_second=1.2)
-    assert r.engine == "cloud"
-    assert "too slow" in r.reason
-
-
-def test_measured_fast_local_model_stays_local():
-    r = route_turn("how do raindrops actually form", cloud_available=True,
-                   local_tokens_per_second=18.0)
-    assert r.engine == "local"
+def test_model_speed_is_no_longer_a_routing_factor():
+    """The slow-local override steered around an underpowered Ollama model;
+    the hosted ladder removed it. The parameter is accepted and ignored."""
+    for tps in (1.2, 18.0):
+        r = route_turn("how do raindrops actually form", cloud_available=True,
+                       local_tokens_per_second=tps)
+        assert r.engine == "local", tps
 
 
 def test_greetings_stay_local_even_on_a_slow_machine():
@@ -86,9 +83,10 @@ def test_greetings_stay_local_even_on_a_slow_machine():
     assert r.engine == "local"
 
 
-def test_questions_about_the_users_own_data_go_straight_to_the_brain_that_uses_tools():
-    """Live finding: the local model claimed it could not look, costing ~34s
-    before the cloud answered the same question in ~4s."""
+def test_questions_about_the_users_own_data_stay_on_the_chain():
+    """These escalated when the local brain could not use tools. Every tier
+    of the chain gets the same tool schemas and semantic recall, so the
+    dodge-without-looking failure the heuristic guarded against is gone."""
     for q in (
         "according to my project documents, what sandbox did we choose?",
         "what deadlines do I have on my projects this week",
@@ -97,8 +95,7 @@ def test_questions_about_the_users_own_data_go_straight_to_the_brain_that_uses_t
         "what can you see right now",
     ):
         r = route_turn(q, cloud_available=True)
-        assert r.engine == "cloud", q
-        assert "your own data" in r.reason
+        assert r.engine == "local", q
 
 
 def test_promises_to_act_are_detected():

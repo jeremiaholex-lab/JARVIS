@@ -2,6 +2,8 @@ import time
 
 import pytest
 
+from jarvis.agent.user_model import explicit_statement
+
 from jarvis.agent.user_model import UserModel, _same_enough, extract_facts
 
 
@@ -134,3 +136,63 @@ def test_model_and_episodes_share_one_database_file(tmp_path):
     assert memory.stats()["episodes"] == 1
     assert user_model.stats()["active"] == 1
     assert db.exists()
+
+
+# ---------------------------------------------------------------- explicit keep
+# The grammar, not the extractor, has to honour "do not lose it": on 10 Nov the
+# owner said "my building elevator access code is 9 3 1 4, do not lose it", the
+# pattern only knew a leading "remember that", nothing was pinned, and every
+# later asking got "I cannot determine that".
+@pytest.mark.parametrize("text,want", [
+    ("my building elevator access code is 9 3 1 4, do not lose it",
+     "my building elevator access code is 9 3 1 4"),
+    ("remember that my wifi password is hunter2", "my wifi password is hunter2"),
+    ("please remember the parking spot is B4, level 3", "the parking spot is B4, level 3"),
+    ("my passport number is X1234567 for future reference", "my passport number is X1234567"),
+    ("account 4471 sort 090125, keep that in mind", "account 4471 sort 090125"),
+    ("my sister's birthday is 3 March - note this down", "my sister's birthday is 3 March"),
+    ("I'm vegetarian, don't forget", "I'm vegetarian"),
+    ("nice, thanks! remember that I fly on Tuesdays", "I fly on Tuesdays"),
+])
+def test_explicit_keep_statement_is_pinned(text, want):
+    assert explicit_statement(text) == want
+
+
+@pytest.mark.parametrize("text", [
+    "don't forget to take the bins out",        # a reminder, not a fact
+    "did you remember to save my file?",        # a question
+    "what is my elevator code? do not lose it",  # a question with a marker
+    "what's the weather",
+    "tell me a joke",
+    "remind me to call mum at five",
+    "I like coffee",                            # no ask to keep anything
+])
+def test_everyday_lines_are_not_pinned_as_facts(text):
+    assert explicit_statement(text) == ""
+
+
+def test_a_pinned_fact_survives_into_the_prompt_and_beats_incidental_ones(model):
+    fact = model.remember_explicit("my building elevator access code is 9 3 1 4, do not lose it")
+    assert fact is not None and fact.pinned
+    model.put("mood", "The user is in a good mood.")       # newer, but unpinned
+    block = model.prompt_block()
+    assert "9 3 1 4" in block
+    assert block.index("9 3 1 4") < block.index("good mood")   # pinned first
+
+
+def test_re_stating_a_pinned_fact_updates_the_slot_instead_of_duplicating(model):
+    first = model.remember_explicit("my wifi password is hunter2, do not lose it")
+    second = model.remember_explicit("remember that my wifi password is swordfish")
+    assert first.key == second.key
+    assert model.active_facts()[0].value == "my wifi password is swordfish"
+    assert len([f for f in model.active_facts()]) == 1
+
+
+def test_episodic_store_shares_the_one_grammar(tmp_path):
+    """memory.maybe_store_fact must not keep a weaker copy of the rule."""
+    from jarvis.agent.memory import Memory
+
+    m = Memory(tmp_path / "memory.db")
+    assert m.maybe_store_fact("my locker combination is 12-34-56, do not lose it") \
+        == "my locker combination is 12-34-56"
+    assert m.maybe_store_fact("don't forget to take the bins out") is None

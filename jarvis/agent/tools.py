@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,11 @@ _READ_TOOL_NAMES = ("jarvis_projects_read", "jarvis_rag_search")
 # list must stay tiny and explicit — a new write tool is not callable here
 # until it is added to this tuple and proven to do no mutation on its own.
 _PROPOSE_ONLY_TOOLS = ("jarvis_projects_write", "jarvis_file_edit")
+
+# Non-READ tools execute() runs because their effect is local, reversible and
+# actually happens (unlike a proposer). An explicit "remember this" belongs in
+# the user model the user asked for; refusing it would lose the instruction.
+_LOCAL_WRITE_TOOLS = ("jarvis_remember",)
 
 
 @dataclass(slots=True)
@@ -94,6 +100,41 @@ def _projects_read(view: str, project_name: str = "") -> str:
     return json.dumps({"error": "view must be projects, deadlines, or due_soon"})
 
 
+def _recall_memory(query: str, top_k: int = 4) -> str:
+    """Semantic search over past conversations (roadmap #5).
+
+    Reads the same shared memory.db every host writes, through the lazily
+    built module singleton; a machine without episodic data just gets an
+    empty result, never an exception that would surface in a spoken turn."""
+    global _SEM_CACHE
+    try:
+        if _SEM_CACHE is None:
+            from jarvis.agent.memory import shared_memory_path
+            from jarvis.agent.semantic import SemanticMemory
+
+            def _no_headroom() -> bool:
+                from jarvis.agent.governor import default_governor
+                return default_governor().is_warn()
+
+            _SEM_CACHE = SemanticMemory(shared_memory_path(), lexical_gate=_no_headroom)
+        sem = _SEM_CACHE
+        hits = sem.search(query, k=max(1, min(int(top_k or 4), 8)))
+    except Exception as exc:
+        return json.dumps({"error": f"memory search unavailable: {exc.__class__.__name__}"})
+    if not hits:
+        return json.dumps({"results": [], "note": "nothing relevant in past conversations"})
+    import time as _t
+    return json.dumps({
+        "results": [{"when": _t.strftime("%Y-%m-%d", _t.localtime(h.ts)),
+                     "speaker": h.role, "text": h.text, "score": round(h.score, 3)}
+                    for h in hits],
+        "note": "old fragments, may be outdated; only use what clearly answers the question",
+    }, ensure_ascii=False)
+
+
+_SEM_CACHE = None
+
+
 def _rag_search(query: str, top_k: int = 3) -> str:
     from jarvis.rag.setup import ask as rag_ask
 
@@ -129,14 +170,31 @@ def _google_read(view: str, limit: int = 8) -> str:
     return json.dumps({"view": view, "items": items}, ensure_ascii=False)
 
 
-def _web_search(query: str, limit: int = 5, freshness: str = "") -> str:
+def _web_search(query: str, limit: int = 5, freshness: str = "", kind: str = "auto") -> str:
     """Read-only DuckDuckGo search; no API key or account required."""
     from jarvis.skills.web_search import WebSearchConnector
 
     try:
-        items = WebSearchConnector().fetch_view(query, limit=limit, freshness=freshness)
+        items = WebSearchConnector().fetch_view(query, limit=limit, freshness=freshness,
+                                                kind=kind)
     except Exception as exc:
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        # The wording here is what the model repeats to the user. A bare
+        # exception once came out as "the web search tool isn't available due
+        # to a missing dependency" when the package was installed all along.
+        return json.dumps({
+            "error": str(exc),
+            "note": "The search package IS installed; the public DuckDuckGo "
+                    "endpoint did not answer this time. Tell the user the search "
+                    "did not answer and offer to retry. Never report a missing "
+                    "dependency or an unavailable tool, and do not substitute a "
+                    "from-memory answer.",
+        }, ensure_ascii=False)
+    if not items:
+        return json.dumps({
+            "query": query, "results": [],
+            "note": "The endpoint answered with no results for this wording. "
+                    "Say that plainly; do not invent headlines.",
+        }, ensure_ascii=False)
     return json.dumps({"query": query, "results": items,
                        "cite": "attribute any claim you use to its domain"}, ensure_ascii=False)
 
@@ -206,6 +264,97 @@ def configure_file_edits(editor) -> None:
     _FILE_EDITOR = editor
 
 
+_USER_MODEL = None
+
+
+def configure_file_watchers(manager) -> None:
+    """Inject the host's persisted, root-restricted file watcher manager."""
+    global _FILE_WATCHERS
+    _FILE_WATCHERS = manager
+
+
+_SCHEDULES = None
+
+
+def configure_schedules(store) -> None:
+    """Inject the host's ScheduleStore (the cron layer over the task queue).
+
+    Without a host, the schedule tool reports that it is not wired up
+    instead of inventing a second store."""
+    global _SCHEDULES
+    _SCHEDULES = store
+
+
+def _task_schedule(action: str, cron: str = "", instruction: str = "",
+                   schedule_id: str = "") -> str:
+    """Manage recurring cron schedules over the durable task queue."""
+    from jarvis.agent.schedules import CronError
+
+    if _SCHEDULES is None:
+        return json.dumps({"error": "schedules are not wired up in this host"})
+    try:
+        if action == "create":
+            sched = _SCHEDULES.create(cron, instruction)
+            return json.dumps({
+                "id": sched.id,
+                "cron": sched.cron,
+                "instruction": sched.instruction,
+                "next_run_at": _fmt_ts(sched.next_run_at),
+                "note": "Recurring; each slot enqueues one read-only background task.",
+            }, ensure_ascii=False)
+        if action == "list":
+            return json.dumps({"schedules": [
+                {"id": s.id, "cron": s.cron, "instruction": s.instruction,
+                 "enabled": s.enabled, "next_run_at": _fmt_ts(s.next_run_at),
+                 "last_fired_at": _fmt_ts(s.last_fired_at) if s.last_fired_at else "",
+                 "last_task_id": s.last_task_id}
+                for s in _SCHEDULES.list()
+            ]}, ensure_ascii=False)
+        if action in ("pause", "resume"):
+            sched = _SCHEDULES.set_enabled(schedule_id, action == "resume")
+            return json.dumps({"id": sched.id, "enabled": sched.enabled,
+                               "next_run_at": _fmt_ts(sched.next_run_at)},
+                              ensure_ascii=False)
+        if action == "remove":
+            _SCHEDULES.remove(schedule_id)
+            return json.dumps({"id": schedule_id, "removed": True})
+        return json.dumps({"error": "action must be create, list, pause, resume, or remove"})
+    except CronError as exc:
+        return json.dumps({"error": f"invalid cron expression: {exc}"}, ensure_ascii=False)
+    except (KeyError, ValueError, OSError) as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def _fmt_ts(ts: float) -> str:
+    if not ts:
+        return ""
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") + " local"
+
+
+def configure_user_model(model) -> None:
+    """Inject the host's UserModel so jarvis_remember can pin a fact.
+
+    Same shape as configure_writes: without a host, the tool reports that the
+    user model is unavailable instead of writing to a second store.
+    """
+    global _USER_MODEL
+    _USER_MODEL = model
+
+
+def _remember(key: str = "", value: str = "") -> str:
+    """Pin one durable fact about the user, at their request."""
+    if _USER_MODEL is None:
+        return json.dumps({"error": "the user model is not wired up in this host"})
+    if not (value or "").strip():
+        return json.dumps({"error": "no fact value provided"})
+    try:
+        fact = _USER_MODEL.put(key or value, value, source="explicit", pinned=True)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    return json.dumps({"remembered": fact.value, "key": fact.key, "pinned": True},
+                      ensure_ascii=False)
+
+
 def _projects_write(action: str = "", name: str = "", path: str = "",
                     project_name: str = "", title: str = "", due_date: str = "",
                     deadline_id=None, status: str = "") -> str:
@@ -238,6 +387,146 @@ def _file_edit(action: str = "", path: str = "", old_string: str = "",
     return json.dumps(out, ensure_ascii=False)
 
 
+def _task_enqueue(goal: str, idempotency_key: str = "") -> str:
+    """Queue a bounded read-only background task for the orb task worker."""
+    from jarvis.agent.task_runner import configured_task_store
+
+    store = configured_task_store()
+    if store is None:
+        return json.dumps({"error": "durable task worker is not available in this host"})
+    task = store.create(goal, idempotency_key=idempotency_key)
+    return json.dumps({"task_id": task.id, "status": task.status,
+                       "goal": task.goal, "note": "Queued; the task runs with read-only tools."},
+                      ensure_ascii=False)
+
+
+def _watch_files(action: str, watcher_id: str = "", root: str = "", pattern: str = "**/*",
+                 task_instruction: str = "Summarize the changed file and its important points.") -> str:
+    """Manage opt-in local file watchers; watcher tasks remain read-only."""
+    manager = _FILE_WATCHERS
+    if manager is None:
+        return json.dumps({"error": "file watchers are not available in this host"})
+    try:
+        if action == "create":
+            watcher = manager.create(root, pattern, task_instruction)
+            return json.dumps({"watcher": {
+                "id": watcher.id, "root": watcher.root, "pattern": watcher.pattern,
+                "task_instruction": watcher.task_instruction, "enabled": watcher.enabled,
+                "baseline": "Existing matching files were recorded; only later changes trigger tasks.",
+            }}, ensure_ascii=False)
+        if action == "list":
+            return json.dumps({"watchers": [{
+                "id": w.id, "root": w.root, "pattern": w.pattern,
+                "task_instruction": w.task_instruction, "enabled": w.enabled,
+                "last_triggered_at": w.last_triggered_at,
+            } for w in manager.list()]}, ensure_ascii=False)
+        if action in {"pause", "resume"}:
+            watcher = manager.set_enabled(watcher_id, action == "resume")
+            return json.dumps({"id": watcher.id, "enabled": watcher.enabled})
+        if action == "remove":
+            manager.remove(watcher_id)
+            return json.dumps({"id": watcher_id, "removed": True})
+        return json.dumps({"error": "action must be create, list, pause, resume, or remove"})
+    except (KeyError, ValueError, OSError) as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def _task_status(task_id: str = "", limit: int = 10) -> str:
+    """Read durable background-task status without exposing local database internals."""
+    from jarvis.agent.task_runner import configured_task_store
+
+    store = configured_task_store()
+    if store is None:
+        return json.dumps({"error": "durable tasks are not available in this host"})
+    if task_id:
+        task = store.get(task_id)
+        if task is None:
+            return json.dumps({"error": "task not found"})
+        return json.dumps({"task": {"id": task.id, "goal": task.goal, "status": task.status,
+                                    "steps": task.steps, "result": task.result, "error": task.error},
+                           "events": store.events(task_id)}, ensure_ascii=False)
+    return json.dumps({"tasks": [{"id": t.id, "goal": t.goal, "status": t.status,
+                                   "steps": t.steps, "result": t.result, "error": t.error}
+                                  for t in store.list(limit=limit, include_terminal=False)]}, ensure_ascii=False)
+
+
+def _plan_and_enqueue(goal: str, max_subtasks: int = 5, idempotency_key: str = "") -> str:
+    """Decompose a goal into a plan of sub-tasks and enqueue them atomically."""
+    from jarvis.agent.task_runner import configured_task_store
+    from jarvis.agent.planner import decompose_goal
+
+    store = configured_task_store()
+    if store is None:
+        return json.dumps({"error": "durable task worker is not available in this host"})
+
+    try:
+        plan = decompose_goal(goal, max_subtasks=max_subtasks, call_engine=_planner_engine,
+                              idempotency_key=idempotency_key)
+    except ValueError as exc:
+        return json.dumps({"error": f"plan validation failed: {exc}"})
+    except Exception as exc:
+        return json.dumps({"error": f"planner unavailable: {exc.__class__.__name__}: {exc}"})
+
+    try:
+        root, subtasks = store.create_plan(plan)
+    except sqlite3.IntegrityError:
+        # A repeat of the same idempotency key: return the plan already queued
+        # instead of surfacing a raw constraint error.
+        existing = store.get_plan_root_by_key(f"{idempotency_key}:root") if idempotency_key else None
+        if existing is None:
+            return json.dumps({"error": "this plan was already queued"})
+        subtasks = [t for t in store.get_plan_tasks(existing.id) if not t.is_plan_root]
+        root = existing
+    return json.dumps({
+        "plan_id": root.id,
+        "root_goal": root.goal,
+        "subtasks": [
+            {"id": t.id, "index": t.step_index, "goal": t.goal, "depends_on": t.depends_on,
+             "role": t.role}
+            for t in subtasks
+        ],
+        "note": f"Plan enqueued with {len(subtasks)} sub-tasks. Root task coordinates completion.",
+    }, ensure_ascii=False)
+
+
+def _planner_engine(engine: str, msgs: list, tools: list | None) -> dict:
+    """Engine callable for the planner to use the local model.
+
+    Raises rather than inventing a plan: a fabricated decomposition would be
+    queued and executed as if the model had produced it.
+    """
+    from jarvis.agent.tools import _VISION_PROVIDER
+
+    if _VISION_PROVIDER is None:
+        raise ValueError("planner engine is not wired up in this host")
+
+    local_engine, cloud_factory, settings = _VISION_PROVIDER()
+    if local_engine is None:
+        raise ValueError("planner engine is unavailable: no local model")
+
+    from openjarvis.core.types import Message, Role
+    role_map = {r.value: r for r in Role}
+    converted = []
+    for m in msgs:
+        calls = [
+            {"id": c.get("id", ""), "name": c.get("name", ""), "arguments": c.get("arguments", "{}")}
+            for c in (m.get("tool_calls") or [])
+        ]
+        converted.append(Message(
+            role=role_map.get(m.get("role", "user"), Role.USER),
+            content=m.get("content") or "",
+            tool_calls=calls or None,
+            tool_call_id=m.get("tool_call_id"),
+        ))
+    return local_engine.generate(
+        converted,
+        model=settings["local_model"],
+        num_ctx=4096,
+        temperature=0.3,
+        max_tokens=800,
+    )
+
+
 def _current_time() -> str:
     now = datetime.now().astimezone()
     return json.dumps({"iso": now.isoformat(timespec="seconds"), "weekday": now.strftime("%A")})
@@ -246,6 +535,7 @@ def _current_time() -> str:
 # The vision path needs live engine/settings objects, which module-level tool
 # functions cannot see. The host injects a provider at startup.
 _VISION_PROVIDER = None
+_FILE_WATCHERS = None
 
 
 def configure_vision(provider) -> None:
@@ -254,9 +544,14 @@ def configure_vision(provider) -> None:
     _VISION_PROVIDER = provider
 
 
-def _look_at_screen(question: str = "what is on this screen?") -> str:
+def _look_at_screen(question: str = "what is on this screen?",
+                    window: str = "") -> str:
     """§6.7 screen perception. Capture is local and free; the *reading* may
-    not be, so consent is checked before a single pixel is sent anywhere."""
+    not be, so consent is checked before a single pixel is sent anywhere.
+
+    `window` targets one app by title or process name (its own pixels, even
+    behind other windows); empty reads the whole display.
+    """
     from jarvis.vision.describe import describe_screen
     from jarvis.vision.screen import ScreenCapture, ScreenCaptureError
 
@@ -265,15 +560,24 @@ def _look_at_screen(question: str = "what is on this screen?") -> str:
     if not ScreenCapture.available():
         return json.dumps({"error": "no screen capture backend on this host"})
     local_engine, cloud_factory, settings = _VISION_PROVIDER()
+    # The host's cloud engine already carries the API key (loaded from .env,
+    # not os.environ, by design). Reaching it here keeps describe_screen's
+    # env fallback working without forcing every host to export secrets.
+    api_key = getattr(cloud_factory, "_api_key", "") or ""
     try:
-        screen = ScreenCapture(ttl=2.0).grab()
+        capture = ScreenCapture(ttl=2.0)
+        if window:
+            screen = capture.capture_window(window)
+        else:
+            screen = capture.grab()
     except ScreenCaptureError as exc:
         return json.dumps({"error": f"screen capture failed: {exc}"})
     except Exception as exc:
         return json.dumps({"error": f"screen capture failed: {exc.__class__.__name__}"})
     try:
         result = describe_screen(screen, question, local_engine=local_engine,
-                                 cloud_factory=cloud_factory, settings=settings)
+                                 cloud_factory=cloud_factory, settings=settings,
+                                 api_key=api_key)
     except Exception as exc:
         return json.dumps({"error": f"vision model failed: {exc.__class__.__name__}"})
     return json.dumps({
@@ -281,7 +585,24 @@ def _look_at_screen(question: str = "what is on this screen?") -> str:
         "where": result.where,
         "model": result.model,
         "capture": f"{screen.width}x{screen.height} {result.ms}ms",
+        "source": screen.backend,
         "reason": result.reason,
+    }, ensure_ascii=False)
+
+
+def _list_open_windows() -> str:
+    """The 'different apps' half of screen perception: which windows exist,
+    so the model can target one it cannot see in a whole-screen grab."""
+    from jarvis.vision.screen import ScreenCapture, ScreenCaptureError
+
+    try:
+        windows = ScreenCapture().list_windows()
+    except ScreenCaptureError as exc:
+        return json.dumps({"error": f"window listing failed: {exc}"})
+    except Exception as exc:
+        return json.dumps({"error": f"window listing failed: {exc.__class__.__name__}"})
+    return json.dumps({
+        "windows": [{"title": w.title, "process": w.process} for w in windows],
     }, ensure_ascii=False)
 
 
@@ -295,7 +616,13 @@ def _check_tier(name: str, fn: Callable[..., str], description: str, parameters:
     return AgentTool(name=name, description=description, parameters=parameters, fn=fn, tier=tier)
 
 
-def build_tools() -> List[AgentTool]:
+def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[AgentTool]:
+    """Build the standard catalog, then validate it and optional READ plugins.
+
+    Extensions are never auto-discovered or imported. Hosts may pass trusted
+    implementations explicitly; the registry requires each extension name to
+    be allowlisted as READ in the deterministic tier policy.
+    """
     tools: List[AgentTool] = []
     projects = _check_tier(
         "jarvis_projects_read",
@@ -326,6 +653,24 @@ def build_tools() -> List[AgentTool]:
             "required": ["query"],
         },
     )
+    recall = _check_tier(
+        "recall_memory",
+        _recall_memory,
+        "Search PAST CONVERSATIONS (what the user said or what you answered, any day, "
+        "any channel). Use when the user asks what they told you, what you discussed, "
+        "or references an earlier conversation: 'what did I say about the lease', "
+        "'do you remember when we shipped'. Returns dated fragments; treat them as "
+        "leads, not current fact. For the user's *documents*, use jarvis_rag_search "
+        "instead.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer", "description": "1-8, default 4"},
+            },
+            "required": ["query"],
+        },
+    )
     google = _check_tier(
         "google_read",
         _google_read,
@@ -346,13 +691,17 @@ def build_tools() -> List[AgentTool]:
         _web_search,
         "Search the web (DuckDuckGo, no account needed). Use for general questions "
         "whose answer is not in the user's own data. Returns titles, snippets, and "
-        "domains; attribute any claim to its source.",
+        "domains; attribute any claim to its source. For news, headlines or "
+        "anything time-sensitive pass freshness (d/w/m/y) - that searches DuckDuckGo "
+        "News and returns dated articles instead of homepages.",
         {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "description": "1-5, default 5"},
                 "freshness": {"type": "string", "description": "optional timelimit: d (day), w (week), m (month), y (year)"},
+                "kind": {"type": "string", "enum": ["auto", "news", "web"],
+                         "description": "auto follows freshness; news = dated articles, web = reference results"},
             },
             "required": ["query"],
         },
@@ -420,6 +769,75 @@ def build_tools() -> List[AgentTool]:
             "required": ["view"],
         },
     )
+    task_enqueue = _check_tier(
+        "jarvis_task_enqueue",
+        _task_enqueue,
+        "Queue a bounded background task for JARVIS to complete using read-only tools. Do this "
+        "only when the user explicitly asks to run something in the background or continue later. "
+        "The task cannot send messages, write files, or make external changes; those stay in the "
+        "existing confirmation flows.",
+        {"type": "object", "properties": {
+            "goal": {"type": "string", "description": "The user's requested task"},
+            "idempotency_key": {"type": "string", "description": "Optional request id to prevent duplicate queueing"},
+        }, "required": ["goal"]},
+    )
+    file_watch = _check_tier(
+        "jarvis_file_watch",
+        _watch_files,
+        "Manage local file watchers. Create only when explicitly requested, and only under approved roots. "
+        "Watchers enqueue bounded read-only tasks after a matching file stabilizes; they never edit files "
+        "or send content externally. Use action=list to review, pause/resume to control, and remove to delete.",
+        {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "pause", "resume", "remove"]},
+            "root": {"type": "string", "description": "Existing approved folder to watch"},
+            "pattern": {"type": "string", "description": "Relative glob such as **/*.md"},
+            "task_instruction": {"type": "string", "description": "Read-only work to enqueue for each changed file"},
+            "watcher_id": {"type": "string", "description": "Required for pause, resume, and remove"},
+        }, "required": ["action"]},
+    )
+    task_status = _check_tier(
+        "jarvis_task_status",
+        _task_status,
+        "Read status of queued JARVIS background tasks. Provide task_id for one task, or omit it "
+        "to list recent active tasks. This tool cannot create, retry, or cancel tasks.",
+        {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+            "limit": {"type": "integer", "description": "1-20, default 10"},
+        }},
+    )
+    task_schedule = _check_tier(
+        "jarvis_task_schedule",
+        _task_schedule,
+        "Create or manage recurring scheduled tasks, using 5-field cron in local time "
+        "(minute hour day-of-month month day-of-week; e.g. '0 9 * * 1' is every Monday 9am). "
+        "Each slot enqueues one read-only background task; missed slots fire late once and "
+        "never backfill. Use when the user wants work repeated on a schedule "
+        "(e.g. 'every Monday, summarize last week's emails'). action=create needs cron and "
+        "instruction; pause/resume/remove need schedule_id; list shows all schedules.",
+        {"type": "object", "properties": {
+            "action": {"type": "string",
+                       "enum": ["create", "list", "pause", "resume", "remove"]},
+            "cron": {"type": "string",
+                     "description": "5-field cron expression, local time (create only)"},
+            "instruction": {"type": "string",
+                             "description": "What the scheduled task should do (create only)"},
+            "schedule_id": {"type": "string",
+                            "description": "Required for pause, resume, remove"},
+        }, "required": ["action"]},
+    )
+    plan_and_enqueue = _check_tier(
+        "jarvis_plan_and_enqueue",
+        _plan_and_enqueue,
+        "Decompose a goal into a plan of dependent sub-tasks and enqueue them atomically. "
+        "Use when the user wants multi-step background work (research, summarization, analysis). "
+        "The planner returns a DAG of sub-tasks with dependencies; the root task coordinates completion. "
+        "Sub-tasks run with read-only tools and cannot perform writes.",
+        {"type": "object", "properties": {
+            "goal": {"type": "string", "description": "The user's high-level goal"},
+            "max_subtasks": {"type": "integer", "description": "Maximum sub-tasks (1-10, default 5)"},
+            "idempotency_key": {"type": "string", "description": "Optional request id to prevent duplicate queueing"},
+        }, "required": ["goal"]},
+    )
     clock = _check_tier(
         "get_current_time",
         _current_time,
@@ -430,14 +848,106 @@ def build_tools() -> List[AgentTool]:
     screen = _check_tier(
         "look_at_screen",
         _look_at_screen,
-        "Look at the user's current screen and answer a question about it — an error "
-        "message, what window is open, text on display. Reading stays on-device when a "
-        "local vision model exists; otherwise it requires the user's vision consent and "
-        "returns an explanation instead of sending anything.",
-        {"type": "object", "properties": {"question": {"type": "string"}}},
+        "Look at the user's screen — the whole display, or one app's window by "
+        "name (window='Chrome', or an exact title from list_open_windows). Use "
+        "for an error message, visible text, or what a specific app is showing. "
+        "Reading stays on-device when a local vision model exists; otherwise it "
+        "requires the user's vision consent and returns an explanation instead "
+        "of sending anything.",
+        {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "window": {"type": "string",
+                            "description": "app or window title to capture; empty = whole screen"},
+            },
+        },
     )
-    tools.extend([t for t in (projects, rag, google, web, files_read, files_list,
-                               files_search, notion, clock, screen) if t is not None])
+    windows_tool = _check_tier(
+        "list_open_windows",
+        _list_open_windows,
+        "List the titles and process names of the user's open windows. Use "
+        "before look_at_screen when the user names an app, or when a window "
+        "match is ambiguous — it returns the exact titles to target.",
+        {"type": "object", "properties": {}},
+    )
+    tools.extend([t for t in (projects, rag, recall, google, web, files_read, files_list,
+                               files_search, notion, task_enqueue, task_status,
+                               task_schedule, plan_and_enqueue,
+                               file_watch, clock, screen, windows_tool) if t is not None])
+
+    # Sandbox and browser automation. All six are READ-tier: the sandbox is
+    # AST-validated and run inside the Docker/restricted-process boundary, and
+    # the browser is a fresh headless session that writes nothing to the host.
+    from jarvis.agent.sandbox_browser_tools import (
+        browser_click, browser_extract, browser_navigate,
+        browser_screenshot, browser_type, sandbox_execute,
+    )
+    sandbox = _check_tier(
+        "sandbox_execute",
+        sandbox_execute,
+        "Run Python in an isolated sandbox and return what it prints. Use print() "
+        "for results. Only json, math, and time may be imported; file IO, network, "
+        "eval/exec, and private attributes are rejected before execution. Reports "
+        "which isolation ran (docker or fallback) — do not claim container "
+        "isolation when the note says fallback.",
+        {"type": "object", "properties": {
+            "code": {"type": "string", "description": "Python source to run"},
+            "timeout": {"type": "integer", "description": "seconds, 1-60 (default 30)"},
+        }, "required": ["code"]},
+    )
+    nav = _check_tier(
+        "browser_navigate",
+        browser_navigate,
+        "Open a URL in a fresh headless browser and return the page title and text. "
+        "Private, loopback, and cloud-metadata addresses are refused by SSRF "
+        "protection. Use browser_extract for links or tables afterwards.",
+        {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "wait_for": {"type": "string", "enum": ["load", "domcontentloaded", "networkidle"]},
+        }, "required": ["url"]},
+    )
+    click = _check_tier(
+        "browser_click",
+        browser_click,
+        "Click an element on the current browser page. Pass visible text, a CSS "
+        "selector, or a short description like 'first video result'.",
+        {"type": "object", "properties": {
+            "selector": {"type": "string"},
+            "by_text": {"type": "boolean", "description": "prefer text matching (default false)"},
+        }, "required": ["selector"]},
+    )
+    type_ = _check_tier(
+        "browser_type",
+        browser_type,
+        "Type text into a form field on the current browser page. clear=true "
+        "replaces the field's contents (default); false appends.",
+        {"type": "object", "properties": {
+            "selector": {"type": "string"},
+            "text": {"type": "string"},
+            "clear": {"type": "boolean"},
+        }, "required": ["selector", "text"]},
+    )
+    shot = _check_tier(
+        "browser_screenshot",
+        browser_screenshot,
+        "Capture the current browser page and report its size. The image itself "
+        "is not returned to the model; nothing is written to disk.",
+        {"type": "object", "properties": {
+            "full_page": {"type": "boolean", "description": "capture the full scrollable page"},
+        }},
+    )
+    extract = _check_tier(
+        "browser_extract",
+        browser_extract,
+        "Extract text, links, or tables from the current browser page. Run "
+        "browser_navigate first.",
+        {"type": "object", "properties": {
+            "selector": {"type": "string", "description": "CSS selector (default 'body')"},
+            "extract_type": {"type": "string", "enum": ["text", "links", "tables"]},
+        }},
+    )
+    tools.extend([t for t in (sandbox, nav, click, type_, shot, extract) if t is not None])
 
     # Stage 2: one WRITE-tier tool. It is advertised (so the model knows it can
     # act), but its fn is a side-effect-free proposer — running it only queues
@@ -500,7 +1010,37 @@ def build_tools() -> List[AgentTool]:
         fn=_file_edit,
         tier=Tier.DESTRUCTIVE,
     ))
-    return tools
+
+    # Local, reversible, and something the user explicitly asked for. WRITE-tier
+    # because it changes state, but execute() runs it directly (_LOCAL_WRITE_TOOLS):
+    # nothing leaves the machine and there is no confirmation to wait for.
+    tools.append(AgentTool(
+        name="jarvis_remember",
+        description=(
+            "Pin one durable fact about the user when they ask you to remember "
+            "something ('remember that I prefer short answers'). key is a short "
+            "stable slug (e.g. 'answer-style'); value is one sentence. The fact "
+            "is stored locally, is injected into future prompts, and survives "
+            "restarts. Only call this when the user asks you to remember "
+            "something, not for facts you inferred."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "short stable slug, e.g. 'answer-style'"},
+                "value": {"type": "string", "description": "one sentence to remember"},
+            },
+            "required": ["value"],
+        },
+        fn=_remember,
+        tier=Tier.WRITE,
+    ))
+    from jarvis.agent.registry import ToolRegistry
+    registry = ToolRegistry()
+    registry.register_many(tools, builtin=True)
+    if extension_tools:
+        registry.register_many(extension_tools)
+    return registry.list()
 
 
 def tool_schemas(tools: List[AgentTool]) -> List[Dict[str, Any]]:
@@ -521,7 +1061,7 @@ def execute(tools: List[AgentTool], name: str, arguments: Any) -> str:
     if tool is None:
         return json.dumps({"error": f"tool {name!r} is not available in the orb (read-only tier)"})
     tier = classify(PlannedAction(tool=name, params={}))
-    if tier is not Tier.READ and name not in _PROPOSE_ONLY_TOOLS:
+    if tier is not Tier.READ and name not in _PROPOSE_ONLY_TOOLS and name not in _LOCAL_WRITE_TOOLS:
         return json.dumps({"error": f"tool {name!r} refused: not read-tier"})
     if isinstance(arguments, str):
         try:

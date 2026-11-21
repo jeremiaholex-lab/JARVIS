@@ -14,7 +14,7 @@ import json
 import re
 import shutil
 import sqlite3
-import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -33,8 +33,8 @@ _DIAGNOSE_SYSTEM = (
     "failure of an AGENT SKILL. Propose the MINIMAL fix to the skill's code. "
     "You may only edit files under the skill's own directory. "
     "Respond as strict JSON: "
-    '{"diagnosis": "...", "fix": "...", "test_script": "python script that verifies the fix", '
-    '"changed_files": ["relative/path"]}'
+    '{"diagnosis": "...", "fix": "...unified diff...", "test_script": "python script that verifies the fix", '
+    '"changed_files": {"relative/path": "full replacement text"}}'
 )
 
 
@@ -108,12 +108,112 @@ def _path_inside_skills(target: str, skills_dir: Path) -> Optional[Path]:
     return None
 
 
+def _path_inside_skill(target: str, skill_root: Path) -> Optional[Path]:
+    """Resolve a relative patch target inside one scratch skill directory."""
+    if Path(target).is_absolute():
+        return None
+    candidate = (skill_root / target).resolve()
+    root = skill_root.resolve()
+    if root in candidate.parents or candidate.parent == root:
+        return candidate
+    return None
+
+
+def _patch_suffix(target: str) -> str:
+    """Strip unified-diff a/ or b/ prefixes from a patch target."""
+    if target.startswith(("a/", "b/")):
+        return target[2:]
+    return target
+
+
+def _apply_unified_diff(patch: str, skill_root: Path) -> None:
+    """Apply a minimal unified diff to the scratch skill copy."""
+    lines = patch.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("--- "):
+            index += 1
+            continue
+        old_name = _patch_suffix(lines[index][4:].strip())
+        if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
+            raise ValueError("unified diff is missing its +++ line")
+        new_name = _patch_suffix(lines[index + 1][4:].strip())
+        if old_name != new_name:
+            raise ValueError("unified diff renames are not supported")
+        target = _path_inside_skill(old_name, skill_root)
+        if target is None:
+            raise ValueError(f"patch target escapes the scratch skill: {old_name}")
+        index += 2
+        hunks = []
+        while index < len(lines) and lines[index].startswith("@@"):
+            header = lines[index]
+            match = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", header)
+            if not match:
+                raise ValueError(f"malformed unified diff hunk: {header}")
+            old_line = int(match.group(1))
+            index += 1
+            body: List[str] = []
+            while index < len(lines) and not lines[index].startswith(("--- ", "@@")):
+                line = lines[index]
+                if line.startswith("\\"):
+                    index += 1
+                    continue
+                if line[:1] not in (" ", "-", "+"):
+                    break
+                body.append(line)
+                index += 1
+            hunks.append((old_line, body))
+        if not hunks:
+            raise ValueError("unified diff has no hunks")
+        original = target.read_text(encoding="utf-8").splitlines(keepends=True)
+        for old_line, body in hunks:
+            cursor = max(0, old_line - 1)
+            rebuilt: List[str] = []
+            for line in body:
+                if line.startswith(" "):
+                    if cursor >= len(original) or original[cursor].rstrip("\r\n") != line[1:]:
+                        raise ValueError("unified diff context does not match the scratch skill")
+                    rebuilt.append(original[cursor])
+                    cursor += 1
+                elif line.startswith("-"):
+                    if cursor >= len(original) or original[cursor].rstrip("\r\n") != line[1:]:
+                        raise ValueError("unified diff removal does not match the scratch skill")
+                    cursor += 1
+                else:
+                    rebuilt.append(line[1:] + "\n")
+            original[cursor - sum(1 for line in body if line.startswith((" ", "-"))):cursor] = rebuilt
+        target.write_text("".join(original), encoding="utf-8")
+
+
+def _apply_changed_files(changed_files, skill_root: Path) -> None:
+    """Apply full-file replacements keyed by relative path."""
+    if not isinstance(changed_files, dict):
+        return
+    for target_name, content in changed_files.items():
+        target = _path_inside_skill(target_name, skill_root)
+        if target is None:
+            raise ValueError(f"changed file escapes the scratch skill: {target_name}")
+        if not isinstance(content, str):
+            raise ValueError(f"changed file content must be text: {target_name}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+def _candidate_workdir(skill_name: str, *, candidate_root: Path) -> Path:
+    """Create a unique candidate work directory for one heal attempt."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    work = candidate_root / skill_name / stamp
+    work.mkdir(parents=True)
+    return work
+
+
 def heal_failure(
     failure: Failure,
     *,
     local_engine,
     cloud_engine=None,
     skills_dir: Optional[Path] = None,
+    candidate_root: Optional[Path] = None,
 ) -> HealCandidate:
     """Diagnose, build a patched scratch copy of the affected skill, and
     sandbox-test the patch. Returns the candidate (not promoted yet)."""
@@ -123,11 +223,8 @@ def heal_failure(
     # The failure names the skill via agent context or the raw text.
     skill_name = _skill_name_for(failure)
     skill_dir = skills_dir / skill_name
-    candidate_dir = Path(get_config_dir()) / "skill-heals" / skill_name
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    candidate_dir.mkdir(parents=True, exist_ok=True)
-    work = candidate_dir / stamp
-    work.mkdir()
+    root = Path(candidate_root) if candidate_root else Path(get_config_dir()) / "skill-heals"
+    work = _candidate_workdir(skill_name, candidate_root=root)
 
     # Patch the skill's code in the scratch copy only.
     if skill_dir.is_dir():
@@ -136,6 +233,17 @@ def heal_failure(
         (work / "skill").mkdir(parents=True)
 
     (work / "fix.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    changed_files = payload.get("changed_files", [])
+    fix = payload.get("fix", "")
+    scratch_skill = work / "skill"
+    patch_note = ""
+    try:
+        if isinstance(changed_files, dict):
+            _apply_changed_files(changed_files, scratch_skill)
+        elif fix:
+            _apply_unified_diff(fix, scratch_skill)
+    except ValueError as exc:
+        patch_note = f"patch rejected: {exc}"
     test_script = payload.get("test_script", "print('no test provided')")
     (work / "test_skill.py").write_text(test_script, encoding="utf-8")
 
@@ -149,12 +257,12 @@ def heal_failure(
     candidate = HealCandidate(
         failure=failure,
         diagnosis=payload.get("diagnosis", ""),
-        fix=payload.get("fix", ""),
+        fix=fix,
         test_script=test_script,
-        changed_files=payload.get("changed_files", []),
+        changed_files=changed_files,
         candidate_dir=work,
-        sandbox_passed=test_result.passed,
-        note=test_result.note,
+        sandbox_passed=test_result.passed if not patch_note else False,
+        note=f"{patch_note}; {test_result.note}" if patch_note else test_result.note,
     )
     return candidate
 

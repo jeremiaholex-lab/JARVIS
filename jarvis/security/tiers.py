@@ -37,6 +37,18 @@ _CONFIRMED_TOOL_TIERS: Dict[str, str] = {
     "browser_post": "destructive",
 }
 
+# Plugin on-ramp: tool names a host-loaded extension is allowed to register.
+# Extensions are read-only by construction (registry.py rejects anything the
+# classifier does not call READ), and classify() defaults unknown names to
+# WRITE — so a plugin tool is only registerable while its name is listed
+# here, explicitly, as a READ. Adding a name is a code change in this repo,
+# which is exactly the gate the plugin system is meant to impose: closed for
+# writes, open for reads.
+_EXTENSION_TOOL_NAMES: frozenset[str] = frozenset({
+    "system_info",  # jarvis/plugins/system_info.py — host CPU/memory/disk snapshot
+})
+
+
 # Deletion/destruction markers in a shell command string.
 _DESTRUCTIVE_SHELL = re.compile(
     r"""(?xi)
@@ -107,7 +119,13 @@ def classify(action: PlannedAction) -> Tier:
         # Any shell that is not explicitly a read-only probe is a write.
         return Tier.WRITE
 
-    # 3. Reads are free.
+    # 3. Allowlisted read-only plugin tools: they are registered by hosts
+    #    only after the same classifier calls them READ, so this list is the
+    #    single source of truth for what extensions may add.
+    if tool in _EXTENSION_TOOL_NAMES:
+        return Tier.READ
+
+    # 4. Reads are free.
     if tool in {
         "file_read",
         "file_read_confirmed",
@@ -120,17 +138,43 @@ def classify(action: PlannedAction) -> Tier:
         "browser_get",
         "get_current_time",
         "look_at_screen",  # §6.7: looking at the screen is a read-only action
+        "list_open_windows",  # same reasoning: enumerating window titles reads,
+                              # it does not touch anything
         "grep",
         "glob",
         "ls",
         "cat",
         "jarvis_rag_search",
+        "recall_memory",  # semantic recall over the user's own episode store:
+                          # reads memory.db, writes nothing
         "google_read",
         "web_search",
         "notion_read",
         "read_file",
         "list_dir",
         "search_files",
+        "jarvis_task_status",
+        "jarvis_task_enqueue",
+        "jarvis_file_watch",
+        # Plan enqueue only writes read-only sub-tasks into the local queue; it
+        # touches nothing on the host. Without this entry the planner tool is
+        # classified WRITE and _check_tier silently drops it from the tool list.
+        "jarvis_plan_and_enqueue",
+        # Recurring schedule configuration: writes only to the local SQLite
+        # schedule table and enqueues read-only queue rows; no host mutation.
+        "jarvis_task_schedule",
+        # Sandboxed computation: AST-validated, no file IO, no network, and
+        # run inside the Docker/restricted-process sandbox. The code cannot
+        # touch the host; the sandbox is the containment, not this table.
+        "sandbox_execute",
+        # Browser tools drive a fresh headless Chromium with no saved logins
+        # and no host filesystem writes; navigate/extract/screenshot are pure
+        # reads, click/type act only on the remote page.
+        "browser_navigate",
+        "browser_click",
+        "browser_type",
+        "browser_screenshot",
+        "browser_extract",
     }:
         return Tier.READ
 

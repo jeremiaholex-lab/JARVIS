@@ -9,10 +9,14 @@ Two of the design's three memory tiers, in one local SQLite file:
               the client deadline is Friday"), written deliberately rather
               than by appending every message.
 
-Nothing here syncs anywhere; the file lives under the JARVIS runtime home.
+Every JARVIS host (the orb, the Telegram bot, scripts) resolves to the ONE
+file below through :func:`shared_memory_path`, so a conversation on any
+channel is visible to every channel on its next turn. No sync layer: the
+SQLite file is the shared state.
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import time
@@ -20,6 +24,22 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+JARVIS_ROOT = Path(__file__).resolve().parents[2]
+
+
+def shared_memory_path() -> Path:
+    """The single memory.db every JARVIS host reads and writes.
+
+    Resolution is deliberately plain: ``$OPENJARVIS_HOME`` when set, else
+    ``JARVIS/.openjarvis``. The orb's old ``governance_home()`` heuristic
+    (env home only when it held a skill-governance ledger) silently split
+    the file from Brain's the moment the env var pointed elsewhere — hosts
+    that share memory must use this one function, and leave
+    ``governance_home()`` for the ledger and audit state.
+    """
+    home = os.environ.get("OPENJARVIS_HOME") or str(JARVIS_ROOT / ".openjarvis")
+    return Path(home) / "memory.db"
 
 # Only a statement that *starts* with "remember" is an instruction to keep a
 # fact. "do you remember that we shipped?" is a question, not a fact.
@@ -85,14 +105,19 @@ class Memory:
             conn.close()
 
     # -- episodic ---------------------------------------------------------
-    def remember_turn(self, role: str, content: str, *, engine: str = "", route_reason: str = "") -> None:
+    def remember_turn(self, role: str, content: str, *, engine: str = "", route_reason: str = "") -> Optional[int]:
+        """Persist one episode; returns its row id (or None when rejected).
+
+        The id is what the semantic tier keys its vector on, so callers that
+        want immediate embedding can hand it straight over."""
         if role not in ("user", "assistant") or not content:
-            return
+            return None
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO episodes(ts, role, content, engine, route_reason) VALUES (?,?,?,?,?)",
                 (time.time(), role, content[:4000], engine, route_reason),
             )
+            return int(cur.lastrowid)
 
     def recent_turns(self, limit: int = 12) -> list[Turn]:
         with self._connect() as conn:
@@ -105,15 +130,16 @@ class Memory:
 
     # -- semantic ---------------------------------------------------------
     def maybe_store_fact(self, text: str) -> Optional[str]:
-        """Store an explicit 'remember that …' statement; returns the fact."""
-        statement = (text or "").strip()
-        if "?" in statement:
-            return None
-        m = _FACT_RE.match(statement)
-        if not m:
-            return None
-        body = m.group("body").strip(" .,!?\n")
-        if not body:
+        """Store a statement the owner explicitly asked to keep; return its text.
+
+        The grammar lives in one place (jarvis.agent.user_model.explicit_statement)
+        so the episodic store and the user model cannot disagree about what
+        "do not lose it" means.
+        """
+        from jarvis.agent.user_model import explicit_statement
+
+        body = explicit_statement(text).strip(" .,!?\n")
+        if len(body) < 3:
             return None
         key = body[:60]
         with self._connect() as conn:
@@ -138,4 +164,4 @@ class Memory:
         return {"episodes": episodes, "facts": facts, "db": str(self.db_path)}
 
 
-__all__ = ["Memory", "Turn"]
+__all__ = ["Memory", "Turn", "shared_memory_path"]

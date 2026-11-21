@@ -5,12 +5,17 @@ from jarvis.security.tiers import Tier
 
 
 def test_every_exposed_tool_is_read_or_a_proposer():
-    # The only non-READ tools offered are safe side-effect-free proposers.
+    # The only non-READ tools offered are safe side-effect-free proposers, or
+    # local writes that execute() runs directly because they touch nothing
+    # outside the machine and need no confirmation.
     # A proposer may be WRITE (project store) or DESTRUCTIVE (file edits) —
     # either way its fn only queues, never mutates.
-    from jarvis.agent.tools import _PROPOSE_ONLY_TOOLS
+    from jarvis.agent.tools import _LOCAL_WRITE_TOOLS, _PROPOSE_ONLY_TOOLS
     for tool in agent_tools.build_tools():
         if tool.tier is Tier.READ:
+            continue
+        if tool.name in _LOCAL_WRITE_TOOLS:
+            assert tool.tier is Tier.WRITE, tool.name
             continue
         assert tool.name in _PROPOSE_ONLY_TOOLS, tool.name
         assert tool.tier in (Tier.WRITE, Tier.DESTRUCTIVE), tool.name

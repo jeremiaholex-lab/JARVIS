@@ -18,18 +18,33 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
-from .routing import (LOW_CONFIDENCE, Route, _ascii_text, needs_retry,
-                      route_turn, tool_nudge_needed)
+from .routing import (LOW_CONFIDENCE, Route, _ascii_text, looks_like_research_request,
+                      looks_like_screen_request, needs_retry, route_turn,
+                      tool_nudge_needed)
 
 _logger = logging.getLogger(__name__)
 
 TOOL_GUIDANCE = (
+    "You may manage local file watchers with jarvis_file_watch only when explicitly requested. "
+    "Watchers are opt-in, limited to approved folders, and enqueue read-only tasks after matching "
+    "files change; they do not modify files or send data to external services. "
+    "For explicitly requested background work, you may queue a task with jarvis_task_enqueue "
+    "and check progress with jarvis_task_status. "
+    "For multi-step goals, use jarvis_plan_and_enqueue to decompose into dependent sub-tasks. "
+    "For work that must repeat on a schedule ('every Monday 9am ...'), create a cron "
+    "schedule with jarvis_task_schedule: it re-queues the same read-only task on time; "
+    "missed slots run late once instead of backfilling. "
+    "Background tasks use read-only tools; do not promise unattended writes or external actions. "
     "You have read-only tools for the user's own data: their projects and "
     "deadlines, their indexed documents, read-only Google mail/calendar/task data, "
     "their Notion notes, a read-only web search, and read-only access to files on "
-    "their computer (read_file, list_dir, search_files). Use a tool "
-    "and the current time. Use a tool "
-    "whenever the answer depends on that data instead of guessing. Never "
+    "their computer (read_file, list_dir, search_files). Use web_search for "
+    "anything the outside world decides and time changes - news, headlines, "
+    "prices, weather, releases, scores, who won - because your training data is "
+    "older than today; never date a remembered fact as if it were current. "
+    "If a tool reports an endpoint failure, say the service did not answer - "
+    "never blame a missing dependency or a missing tool. Use a tool whenever "
+    "the answer depends on data that can change instead of guessing. Never "
     "invent a fact about the user's projects, files, or schedule. When you "
     "need data, call the tool now — do not say you will search, and do not "
     "claim you cannot find something without having called a tool. "
@@ -55,7 +70,7 @@ class TurnResult:
     tools_used: List[str] = field(default_factory=list)
 
 
-EngineCall = Callable[[str, List[Dict], Optional[List[Dict]]], Dict]
+EngineCall = Callable[[str, List[Dict], Optional[List[Dict]], int], Dict]
 
 
 def _messages(system_prompt: str, memory: Sequence, text: str) -> List[Dict]:
@@ -95,9 +110,15 @@ def _run_engine_pass(
     """Drive the tool loop on one engine; return the final text answer."""
     working = list(msgs)
     answer = ""
-    for _round in range(max(1, max_rounds)):
+    rounds = max(1, max_rounds)
+    for round_index in range(rounds):
         t0 = time.time()
-        res = call_engine(engine, working, tools or None)
+        # The last round is answer-only: handing tools to a small model that
+        # has already looked (a screen reading, a search digest) just invites
+        # another call, and the turn dies at the limit guard with no reply.
+        # With no tools offered the model must say what it found.
+        res = call_engine(engine, working, tools if round_index < rounds - 1 else None,
+                          max_tokens)
         ms = round((time.time() - t0) * 1000)
         calls = res.get("tool_calls") or []
         if not calls:
@@ -129,6 +150,18 @@ def _run_engine_pass(
     return "I could not finish that in one go — please narrow it down."
 
 
+def _has_tool(tools: Sequence, name: str) -> bool:
+    """Was `name` offered to the model this turn? Works on both the dict
+    schemas and AgentTool objects callers may pass."""
+    for t in tools or ():
+        if isinstance(t, dict):
+            if (t.get("function") or {}).get("name") == name or t.get("name") == name:
+                return True
+        elif getattr(t, "name", "") == name:
+            return True
+    return False
+
+
 def run_turn(
     text: str,
     *,
@@ -153,6 +186,38 @@ def run_turn(
     tools = list(tools)
     tool_impls = list(tool_impls)
     msgs = _messages(f"{system_prompt}\n\n{TOOL_GUIDANCE}" if tools else system_prompt, memory, text)
+    # "What am I looking at?" has no data the model can reason about — a
+    # confident local answer is by definition invented. When the question
+    # names the screen and a vision tool exists, steer before the first
+    # pass rather than gambling on the post-hoc nudge.
+    if (tools and not force_cloud
+            and looks_like_screen_request(text)
+            and _has_tool(tools, "look_at_screen")):
+        target = (' with window="<app or title>" for a specific app, or '
+                  'window="" for the whole screen; use list_open_windows '
+                  'first if the app is unclear. ') \
+            if _has_tool(tools, "list_open_windows") else " "
+        msgs.append({
+            "role": "system",
+            "content": "The user is asking about their actual screen. Call "
+                       "look_at_screen now" + target +
+                       "Never answer from imagination about screen contents. "
+                       "If the tool says consent is needed, relay that exactly.",
+        })
+    # Same reasoning for facts that move with the world: an unsteered model
+    # answers those from memory in seconds and sounds certain about it.
+    if (tools and not force_cloud
+            and looks_like_research_request(text)
+            and _has_tool(tools, "web_search")):
+        msgs.append({
+            "role": "system",
+            "content": "This depends on the world right now, not on your training "
+                       "data. Call web_search now with a short query, then answer "
+                       "only from what it returns and name the sources. If it "
+                       "returns nothing or an error, say the search endpoint did "
+                       "not answer - do not invent headlines and do not blame a "
+                       "missing dependency.",
+        })
     trace: List[dict] = []
     tools_used: List[str] = []
 

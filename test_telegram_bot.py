@@ -8,7 +8,7 @@ from jarvis.channels.telegram import TelegramBot
 
 class FakeBrain:
     def __init__(self, answer="hello from JARVIS", pending=None, write_results=None,
-                 pending_edits=None, edit_results=None):
+                 pending_edits=None, edit_results=None, memory=None):
         self.answer = answer
         self.calls = []
         self._pending = pending or []
@@ -17,6 +17,7 @@ class FakeBrain:
         self._pending_edits = pending_edits or []
         self.edit_results = edit_results or {}
         self.edit_resolves = []
+        self.memory = memory
 
     def run(self, text, memory=(), force_cloud=False):
         self.calls.append({"text": text, "memory": list(memory), "force_cloud": force_cloud})
@@ -64,12 +65,14 @@ def _sent_texts(bot):
     return [p.get("text", "") for m, p in bot._sent if m == "sendMessage"]
 
 
-def make_bot(tmp_path, answer="hello from JARVIS", pending=None, write_results=None, **kw):
+def make_bot(tmp_path, answer="hello from JARVIS", pending=None, write_results=None,
+             memory=None, **kw):
     bot = TelegramBot(
         token="123:fake",
         brain=FakeBrain(answer, pending=pending, write_results=write_results,
                         pending_edits=kw.pop("pending_edits", None),
-                        edit_results=kw.pop("edit_results", None)),
+                        edit_results=kw.pop("edit_results", None),
+                        memory=memory),
         history_path=tmp_path / "hist.json",
         **kw,
     )
@@ -102,12 +105,39 @@ def test_private_chat_gate_brain_never_runs(tmp_path):
     assert any("private" in p.get("text", "") for m, p in bot._sent if m == "sendMessage")
 
 
+def test_reset_stores_tombstone_so_next_turn_stays_blank(tmp_path):
+    from jarvis.agent.memory import Memory
+    shared = Memory(tmp_path / "memory.db")
+    shared.remember_turn("user", "from the orb")
+    shared.remember_turn("assistant", "noted")
+    bot = make_bot(tmp_path, memory=shared)
+    bot._history["c1"] = [{"role": "user", "content": "old"}]
+    bot.handle_message("c1", "/reset")
+    assert bot._history["c1"] == []
+    # Even though the brain holds shared episodes, a /reset chat stays blank.
+    bot.handle_message("c1", "hello again")
+    assert bot.brain.calls[0]["memory"] == []
+
+
+def test_first_turn_seeds_from_shared_episodes(tmp_path):
+    from jarvis.agent.memory import Memory
+    shared = Memory(tmp_path / "memory.db")
+    shared.remember_turn("user", "what did the orb say?")
+    shared.remember_turn("assistant", "we finished the deploy")
+    bot = make_bot(tmp_path, memory=shared)
+    bot.handle_message("c1", "continue that")
+    seeded = bot.brain.calls[0]["memory"]
+    assert [m["content"] for m in seeded] == ["what did the orb say?", "we finished the deploy"]
+    # The seed is now this chat's own history.
+    assert bot._history["c1"][0]["role"] == "user"
+
+
 def test_reset_clears_that_chats_history_only(tmp_path):
     bot = make_bot(tmp_path)
     bot._history["c1"] = [{"role": "user", "content": "old"}]
     bot._history["c2"] = [{"role": "user", "content": "keep"}]
     bot.handle_message("c1", "/reset")
-    assert "c1" not in bot._history
+    assert bot._history["c1"] == []
     assert bot._history["c2"] == [{"role": "user", "content": "keep"}]
 
 

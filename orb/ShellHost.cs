@@ -10,7 +10,7 @@ public static class ShellHost
     public const int Port = 8010;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(3) };
 
-    public static (Process? backend, bool attached) Launch()
+    public static (Process? backend, bool attached) Launch(bool appendLog = false)
     {
         // Attach if a backend is already serving (second window, or service mode).
         if (PortOpen())
@@ -46,10 +46,13 @@ public static class ShellHost
         psi.Environment["JARVIS_ORB_MANAGED"] = "1";
 
         var proc = Process.Start(psi)!;
-        var outFile = File.Create(Path.Combine(orbDir, "backend.log"));
-        var errFile = File.Create(Path.Combine(orbDir, "backend.err.log"));
-        _ = Task.Run(() => { try { proc.StandardOutput.BaseStream.CopyTo(outFile); } catch { } });
-        _ = Task.Run(() => { try { proc.StandardError.BaseStream.CopyTo(errFile); } catch { } });
+        // appendLog: a supervised restart must not erase the crash evidence
+        // from the previous run. Open handles are closed when the streams
+        // end (process exit), so a restart can open the same files again.
+        var outFile = OpenLog(Path.Combine(orbDir, "backend.log"), appendLog);
+        var errFile = OpenLog(Path.Combine(orbDir, "backend.err.log"), appendLog);
+        _ = Task.Run(() => { try { proc.StandardOutput.BaseStream.CopyTo(outFile); } catch { } finally { try { outFile.Dispose(); } catch { } } });
+        _ = Task.Run(() => { try { proc.StandardError.BaseStream.CopyTo(errFile); } catch { } finally { try { errFile.Dispose(); } catch { } } });
         // The HTTP listener binds only after the module imports finish, which on a
         // cold start includes torch/faster-whisper — allow well past 10s for that.
         for (int i = 0; i < 120 && !PortOpen(); i++)
@@ -63,6 +66,12 @@ public static class ShellHost
             throw new Exception("Backend did not open port 8010 within 30s — see orb\\backend.err.log.");
         }
         return (proc, false);
+    }
+
+    private static FileStream OpenLog(string path, bool append)
+    {
+        if (!append) return File.Create(path);
+        return new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
     }
 
     /// <summary>

@@ -86,7 +86,7 @@
  },
  "recollect-what-told": {
   "cat": "recollect",
-  "ms": 11.7,
+  "ms": 16.2,
   "pass": true
  },
  "retry-hedge-unanchored": {
@@ -231,7 +231,7 @@
  },
  "screen-looking-at": {
   "cat": "screen",
-  "ms": 430.0,
+  "ms": 758.5,
   "pass": true
  },
  "screen-lower-display": {
@@ -274,6 +274,16 @@
   "ms": 0.0,
   "pass": true
  },
+ "switch-bare-lite": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
+ "switch-bare-not-a-sentence": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
  "switch-lite-bare": {
   "cat": "switch",
   "ms": 0.0,
@@ -296,12 +306,12 @@
  },
  "switch-to-35": {
   "cat": "switch",
-  "ms": 6.2,
+  "ms": 7.9,
   "pass": true
  },
  "switch-to-agnes": {
   "cat": "switch",
-  "ms": 0.1,
+  "ms": 0.2,
   "pass": true
  },
  "switch-to-auto": {
@@ -311,7 +321,7 @@
  },
  "switch-to-lite": {
   "cat": "switch",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "tier-browser-nav": {
@@ -386,17 +396,17 @@
  },
  "turn-confidence-escalation": {
   "cat": "turn",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "turn-explicit-cloud": {
   "cat": "turn",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "turn-local-fail-cloud": {
   "cat": "turn",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "turn-nudge-loop": {
@@ -411,22 +421,22 @@
  },
  "turn-screen-steer": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.2,
   "pass": true
  },
  "turn-simple-local": {
   "cat": "turn",
-  "ms": 3.8,
+  "ms": 5.6,
   "pass": true
  },
  "turn-tool-limit-no-tools-last": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.4,
   "pass": true
  },
  "turn-tool-roundtrip": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.2,
   "pass": true
  }
 }

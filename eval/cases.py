@@ -261,6 +261,10 @@ CASES = [
         {"expect": None})},
     {"id": "switch-not-an-instruction", "cat": "switch", "check": ("switch",
         "tell me a joke about a robot", {"expect": None})},
+    {"id": "switch-bare-lite", "cat": "switch", "check": ("switch", "3.5 lite",
+        {"expect": "gemini25"}, "a whole-message alias needs no verb")},
+    {"id": "switch-bare-not-a-sentence", "cat": "switch", "check": ("switch",
+        "agnes is nice", {"expect": None}, "alias must be the WHOLE message")},
 ]
 
 # Optional live checks (only run with --live against the running orb).

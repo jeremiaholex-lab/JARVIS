@@ -366,12 +366,34 @@ _SWITCH_BACK_RE = re.compile(
 )
 
 
+_BARE_ALIASES = {
+    "3.5": "gemini35", "3,5": "gemini35", "35": "gemini35",
+    "gemini": "auto", "gemini 3.5": "gemini35", "3.5 flash": "gemini35",
+    "gemini 3.5 flash": "gemini35", "flash": "gemini35",
+    "lite": "gemini25", "3.5 lite": "gemini25", "gemini 3.5 lite": "gemini25",
+    "flash lite": "gemini25", "3.5 flash lite": "gemini25",
+    "2.5": "gemini25", "gemini 2.5": "gemini25", "25": "gemini25",
+    "agnes": "agnes", "cloud": "agnes", "api": "agnes",
+    "auto": "auto", "automatic": "auto", "default": "auto", "chain": "auto",
+}
+
+
 def parse_model_switch(text: str) -> Optional[str]:
     """Return a tier id or "auto" when the utterance INSTRUCTS a brain change,
-    else None. Conservative: it needs a switch verb, and answers with the
-    confirmation so a mis-parse is always audible and reversible by voice."""
+    else None. Conservative: it needs a switch verb or to BE nothing but a
+    known alias, and the host answers with a confirmation so a mis-parse is
+    always audible and reversible by voice."""
     t = re.sub(r"\s+", " ", (text or "").strip().lower())
-    if not t or len(t.split()) > 14:
+    if not t:
+        return None
+    # Whole-message aliases: typing exactly "3.5 lite" / "agnes" / "auto" is
+    # a command. The utterance must CONSIST of the alias (wake word and
+    # punctuation allowed), so "what do you think of 3.5" stays chat.
+    bare = re.sub(r"[?!.:,;\"']+$", "", t)
+    bare = re.sub(r"^(?:hey[ ,]+)?jarvis[ ,]+", "", bare).strip()
+    if bare in _BARE_ALIASES:
+        return _BARE_ALIASES[bare]
+    if len(t.split()) > 14:
         return None
     # An instruction never negates itself: "don't use gemini 2.5" and "stop
     # using agnes" must not flip to the very tier they mention.

@@ -260,3 +260,18 @@ def test_openai_body_normalizes_compact_tool_calls():
     tc = m1["tool_calls"][0]
     assert tc["type"] == "function" and tc["function"]["name"] == "get_alarm"
     assert seen["messages"][2]["tool_call_id"] == "get_alarm"
+
+
+def test_bare_alias_words_switch_without_a_verb():
+    assert parse_model_switch("3.5") == "gemini35"
+    assert parse_model_switch("3.5 lite") == "gemini25"
+    assert parse_model_switch("agnes") == "agnes"
+    assert parse_model_switch("auto") == "auto"
+    assert parse_model_switch("2.5") == "gemini25"      # retired alias
+    assert parse_model_switch("hey jarvis, lite") == "gemini25"
+
+
+def test_bare_aliases_require_the_whole_message():
+    assert parse_model_switch("what is 3.5 lite") is None
+    assert parse_model_switch("agnes is nice") is None
+    assert parse_model_switch("3.5 plus 2") is None

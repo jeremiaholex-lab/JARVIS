@@ -483,17 +483,27 @@ def run_whisper(audio: np.ndarray) -> tuple[str, float]:
 
 
 def _voice_is_hosted() -> bool:
-    """True when the next piece of speech should go to Gemini TTS."""
+    """True when the next piece of speech should use an external TTS voice."""
     backend = str(SETTINGS.get("voice_backend", "auto")).lower()
-    if backend not in ("auto", "gemini"):
+    if backend in ("crowllm", "gemini"):
+        return True
+    if backend != "auto":
         return False
+    # Automatic mode prefers CrowLLM for speed, then Gemini, then local Kokoro.
+    if _crowllm_available():
+        return True
     if not (ENV.get("GEMINI_API_KEY") or ENV.get("GEMINI_API_KEY_2")):
         return False
-    # "gemini" is an explicit instruction, so it keeps trying; "auto" rests
-    # after a quota rejection instead of failing a round trip per sentence.
-    if backend == "auto" and time.time() < _tts_cooldown_until:
+    # Gemini is the only backend that uses the quota cooldown. CrowLLM has its
+    # own availability path and must not be suppressed by a Gemini 429.
+    if time.time() < _tts_cooldown_until:
         return False
     return True
+
+
+def _crowllm_available() -> bool:
+    """CrowLLM is ready when its key and explicit model config are present."""
+    return bool(ENV.get("CROWLLM_API_KEY") and SETTINGS.get("crowllm_tts", {}).get("model"))
 
 
 def voice_status() -> dict:
@@ -501,6 +511,12 @@ def voice_status() -> dict:
     return {"backend": _last_voice_backend,
             "hosted_available": _voice_is_hosted(),
             "cooldown_s": max(0.0, round(_tts_cooldown_until - time.time(), 1))}
+
+
+def _provider_module():
+    """Indirection lets tests inject provider doubles without patching sys.modules."""
+    import jarvis.agent.providers as providers
+    return providers
 
 
 def synthesize(text: str) -> tuple[bytes, float]:
@@ -513,11 +529,43 @@ def synthesize(text: str) -> tuple[bytes, float]:
     outage or an exhausted quota cannot silence the assistant.
     """
     global _last_voice_backend, _tts_cooldown_until
+    from jarvis.agent.providers import RateLimited
     t0 = time.time()
-    key = ENV.get("GEMINI_API_KEY") or ENV.get("GEMINI_API_KEY_2") or ""
-    if _voice_is_hosted():
+    backend = str(SETTINGS.get("voice_backend", "auto")).lower()
+    if backend == "crowllm" or (backend == "auto" and _crowllm_available()):
         try:
-            from jarvis.agent.providers import RateLimited, gemini_tts
+            providers = _provider_module()
+            crowllm_tts = providers.crowllm_tts
+            config = SETTINGS.get("crowllm_tts") or {}
+            wav = crowllm_tts(
+                text,
+                key=ENV.get("CROWLLM_API_KEY", ""),
+                base_url=ENV.get("CROWLLM_BASE_URL") or config.get("base_url", "https://crowllm.com/v1"),
+                model=config.get("model", "tts-bruce-en"),
+            )
+            if wav:
+                _last_voice_backend = "crowllm"
+                return wav, time.time() - t0
+        except RateLimited:
+            _tts_cooldown_until = time.time() + _TTS_COOLDOWN_S
+            _logger.warning("CrowLLM voice rate-limited; falling back for %.0fs",
+                            _TTS_COOLDOWN_S)
+        except Exception as exc:
+            _logger.warning("CrowLLM voice unavailable (%s); falling back", exc)
+    key = ENV.get("GEMINI_API_KEY") or ENV.get("GEMINI_API_KEY_2") or ""
+    # In auto mode, a missing key or a fresh quota rejection must prevent the
+    # extra network round trip too. An explicit "gemini" setting is a direct
+    # override and still tries the hosted provider.
+    gemini_allowed = backend == "gemini" or (
+        backend == "auto"
+        and not _crowllm_available()
+        and bool(key)
+        and time.time() >= _tts_cooldown_until
+    )
+    if gemini_allowed:
+        try:
+            providers = _provider_module()
+            gemini_tts = providers.gemini_tts
             wav = gemini_tts(text, key=key, voice_id=SETTINGS.get("voice", "af_heart"))
             if wav:
                 _last_voice_backend = "gemini"
@@ -1653,7 +1701,14 @@ def build_app():
         # here competes for CPU and network while speech is being generated.
         c.pending_learning = text
         c.playback_id = uuid.uuid4().hex
-        backend = "gemini" if hosted else "local"
+        hosted = _voice_is_hosted()
+        configured_backend = str(SETTINGS.get("voice_backend", "auto")).lower()
+        if configured_backend in ("crowllm", "gemini"):
+            backend = configured_backend
+        elif hosted and _crowllm_available():
+            backend = "crowllm"
+        else:
+            backend = "gemini" if hosted else "local"
         c.emit(q, "tts_start", id=c.playback_id, backend=backend)
         c.playback_active = True
         _speech_begin()
@@ -1669,16 +1724,19 @@ def build_app():
             tts_errors: list[str] = []
             flush_index = 0
             pending: list = []
-            chunks = speech_chunks(answer,
-                                   pacing=str(SETTINGS.get("voice_pacing", "quick")),
-                                   max_chars=int(SETTINGS.get("speak_max_chars", 0) or 0))
+            chunks = speech_chunks(
+                answer,
+                pacing="smooth" if not hosted else str(SETTINGS.get("voice_pacing", "quick")),
+                max_chars=int(SETTINGS.get("speak_max_chars", 0) or 0))
             hosted = _voice_is_hosted()
             # Hosted synthesis is a network call, so the first few pieces can
             # be requested at once and handed to the browser in order: the
             # reply stays buffered ahead of playback, which is what removes
-            # the mid-sentence pauses. The local voice is CPU-bound and stays
-            # strictly piece-by-piece. Prefetch is capped so a very long
-            # answer cannot pull a wall of audio into memory at once.
+            # the mid-sentence pauses. Local Kokoro is slower than playback on
+            # this CPU: multiple calls contend for the same resources and leave
+            # multi-second gaps, so one whole-reply call keeps audio gapless.
+            # Prefetch is capped so a very long answer cannot pull a wall of
+            # audio into memory.
             prefetch = 4 if hosted else 0
             pending = [asyncio.create_task(asyncio.to_thread(synthesize, s))
                        if i < prefetch else None for i, s in enumerate(chunks)]

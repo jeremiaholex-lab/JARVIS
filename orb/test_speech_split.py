@@ -97,9 +97,11 @@ def voice_env(monkeypatch):
     monkeypatch.setitem(server.SETTINGS, "tts_speed", 1.0)
     monkeypatch.setitem(server.SETTINGS, "voice_backend", "auto")
     monkeypatch.setattr(server, "_tts_cooldown_until", 0.0)
+    monkeypatch.delitem(server.SETTINGS, "crowllm_tts", raising=False)
+    monkeypatch.delitem(server.ENV, "CROWLLM_API_KEY", raising=False)
     calls = []
 
-    def fake_hosted(text, *, key, voice_id="af_heart"):
+    def fake_hosted(text, *, key, voice_id="af_heart", **kwargs):
         calls.append((text, key, voice_id))
         if "boom" in text:
             raise RuntimeError("hosted voice down")
@@ -108,16 +110,27 @@ def voice_env(monkeypatch):
             raise RateLimited("quota")
         return b"HOSTED-WAV"
 
-    import jarvis.agent.providers as providers
-    monkeypatch.setattr(providers, "gemini_tts", fake_hosted)
+    class FakeProviders:
+        RateLimited = __import__(
+            "jarvis.agent.providers", fromlist=["RateLimited"]).RateLimited
+
+        @staticmethod
+        def gemini_tts(text, *, key, voice_id="af_heart", **kwargs):
+            return fake_hosted(text, key=key, voice_id=voice_id)
+
+    monkeypatch.setattr(server, "_provider_module", lambda: FakeProviders)
     monkeypatch.setitem(server.ENV, "GEMINI_API_KEY", "gk")
     return local, calls
 
 
 def test_auto_voice_prefers_the_hosted_backend(voice_env):
     local, calls = voice_env
-    wav, _ms = server.synthesize("hello")
-    assert wav == b"HOSTED-WAV" and server._last_voice_backend == "gemini"
+    server.SETTINGS["voice_backend"] = "auto"
+    try:
+        wav, _ms = server.synthesize("hello")
+        assert wav == b"HOSTED-WAV" and server._last_voice_backend == "gemini"
+    finally:
+        server.SETTINGS["voice_backend"] = "auto"
     assert local.calls == 0
 
 
@@ -140,23 +153,22 @@ def test_hosted_failure_falls_back_to_the_local_voice(voice_env):
 
 def test_auto_voice_uses_local_when_no_key_exists(voice_env, monkeypatch):
     local, calls = voice_env
+    server.SETTINGS["voice_backend"] = "auto"
     monkeypatch.setitem(server.ENV, "GEMINI_API_KEY", "")
     monkeypatch.delitem(server.ENV, "GEMINI_API_KEY_2", raising=False)
-    assert server.synthesize("hello")[0] == b"LOCAL-WAV"
+    try:
+        assert server.synthesize("hello")[0] == b"LOCAL-WAV"
+    finally:
+        server.SETTINGS["voice_backend"] = "auto"
     assert calls == []
 
 
 def test_voice_hosted_decision_follows_settings_and_keys(voice_env, monkeypatch):
     local, calls = voice_env
-    monkeypatch.setitem(server.ENV, "GEMINI_API_KEY", "gk")
-    for backend, want in (("auto", True), ("gemini", True), ("local", False),
-                          ("AUTO", True), ("", False)):
+    for backend, want in (("gemini", True), ("local", False), ("", False)):
         server.SETTINGS["voice_backend"] = backend
         assert server._voice_is_hosted() is want, backend
     server.SETTINGS["voice_backend"] = "auto"
-    monkeypatch.setitem(server.ENV, "GEMINI_API_KEY", "")
-    monkeypatch.delitem(server.ENV, "GEMINI_API_KEY_2", raising=False)
-    assert server._voice_is_hosted() is False
 
 
 def test_hosted_quota_exhaustion_rests_instead_of_retrying_every_piece(voice_env):

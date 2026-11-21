@@ -86,7 +86,7 @@
  },
  "recollect-what-told": {
   "cat": "recollect",
-  "ms": 9.0,
+  "ms": 11.7,
   "pass": true
  },
  "retry-hedge-unanchored": {
@@ -231,7 +231,7 @@
  },
  "screen-looking-at": {
   "cat": "screen",
-  "ms": 473.3,
+  "ms": 430.0,
   "pass": true
  },
  "screen-lower-display": {
@@ -269,6 +269,16 @@
   "ms": 0.0,
   "pass": true
  },
+ "switch-25-alias": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
+ "switch-lite-bare": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
  "switch-negation": {
   "cat": "switch",
   "ms": 0.0,
@@ -284,14 +294,9 @@
   "ms": 0.0,
   "pass": true
  },
- "switch-to-25": {
-  "cat": "switch",
-  "ms": 0.0,
-  "pass": true
- },
  "switch-to-35": {
   "cat": "switch",
-  "ms": 5.6,
+  "ms": 6.2,
   "pass": true
  },
  "switch-to-agnes": {
@@ -300,6 +305,11 @@
   "pass": true
  },
  "switch-to-auto": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
+ "switch-to-lite": {
   "cat": "switch",
   "ms": 0.0,
   "pass": true
@@ -386,7 +396,7 @@
  },
  "turn-local-fail-cloud": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "turn-nudge-loop": {
@@ -406,7 +416,7 @@
  },
  "turn-simple-local": {
   "cat": "turn",
-  "ms": 4.6,
+  "ms": 3.8,
   "pass": true
  },
  "turn-tool-limit-no-tools-last": {
@@ -416,7 +426,7 @@
  },
  "turn-tool-roundtrip": {
   "cat": "turn",
-  "ms": 0.2,
+  "ms": 0.1,
   "pass": true
  }
 }

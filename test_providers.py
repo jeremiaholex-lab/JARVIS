@@ -203,7 +203,11 @@ def test_thinking_budget_rejected_retries_without_it():
 # -------------------------------------------------------------- voice switch
 def test_parse_switch_instruction():
     assert parse_model_switch("switch to gemini 3.5") == "gemini35"
-    assert parse_model_switch("use gemini 2.5 instead") == "gemini25"
+    assert parse_model_switch("switch to gemini 3.5 lite") == "gemini25"
+    assert parse_model_switch("switch to gemini 3.5 flash lite") == "gemini25"
+    assert parse_model_switch("use lite") == "gemini25"
+    assert parse_model_switch("go back to lite") == "gemini25"
+    assert parse_model_switch("use gemini 2.5 instead") == "gemini25"  # retired alias
     assert parse_model_switch("switch to agnes") == "agnes"
     assert parse_model_switch("go back to the cloud model") == "agnes"
     assert parse_model_switch("switch to automatic") == "auto"
@@ -216,6 +220,7 @@ def test_parse_switch_instruction():
 
 def test_parse_switch_rejects_negations_and_chatter():
     assert parse_model_switch("don't use gemini 2.5") is None
+    assert parse_model_switch("don't switch to gemini 3.5 lite") is None
     assert parse_model_switch("stop using agnes") is None
     assert parse_model_switch("what is gemini 3.5") is None
     assert parse_model_switch("did i tell you to switch to gemini 2.5 yesterday") is None

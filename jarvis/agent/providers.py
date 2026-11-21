@@ -354,13 +354,15 @@ def _httpx_post(url: str, headers: dict, body: dict, timeout_s: float) -> tuple[
 _SWITCH_RE = re.compile(
     r"\b(?:switch|change|move|go|set|make it|use|run|fall back|fallback|stick)\b"
     r"[^.?!]*?\b(?:to|onto|on|into|back to)?\b[^.?!]*?"
-    r"(?P<target>(?:gemini[\s-]*)?3[\s.,-]*5|(?:gemini[\s-]*)?2[\s.,-]*5|gemini"
+    r"(?P<target>(?:gemini[\s-]*)?3[\s.,-]*5[\s-]*(?:flash[\s-]*)?lite"
+    r"|\blite\b|(?:gemini[\s-]*)?3[\s.,-]*5|(?:gemini[\s-]*)?2[\s.,-]*5|gemini"
     r"|agnes|the cloud|cloud model|cloud|the api|auto(?:matic)?(?:ly)?|the default|default)"
     r"\b", re.I,
 )
 _SWITCH_BACK_RE = re.compile(
     r"\b(?:switch|change|go back|move|fall back|use)\b[^.?!]*?\bback\b[^.?!]*?"
-    r"(?P<target>gemini[\s-]*3[\s.,-]*5|3\.5|auto(?:matic)?|default)\b", re.I,
+    r"(?P<target>gemini[\s-]*3[\s.,-]*5[\s-]*(?:flash[\s-]*)?lite|gemini[\s-]*3[\s.,-]*5"
+    r"|3[.,]5 ?lite|3\.5|\blite\b|auto(?:matic)?|default)\b", re.I,
 )
 
 
@@ -386,9 +388,13 @@ def parse_model_switch(text: str) -> Optional[str]:
     # "switch to gemini" alone is ambiguous between the two keys -> auto
     if re.fullmatch(r"gemini", target.strip()):
         return "auto"
+    # "lite" BEFORE "3": "gemini 3.5 lite" contains a 3 but names the Lite
+    # slot; ordering the checks this way is the whole disambiguation.
+    if "lite" in target:
+        return "gemini25"
     if "3" in target:
         return "gemini35"
-    if "2" in target:
+    if "2" in target:  # retired name still addresses the slot it created
         return "gemini25"
     if re.search(r"agnes|cloud|api", target):
         return "agnes"
@@ -397,7 +403,7 @@ def parse_model_switch(text: str) -> Optional[str]:
 
 SWITCH_CONFIRM = {
     "gemini35": "Switched. I'll lead with Gemini 3.5 Flash now.",
-    "gemini25": "Switched. I'll lead with the 2.5 slot - Gemini 3.5 Lite - now.",
+    "gemini25": "Switched. I'll lead with Gemini 3.5 Lite now.",
     "agnes": "Switched. I'll use Agnes now.",
     "auto": "Back to automatic: Gemini 3.5 Flash first, then 3.5 Lite, then Agnes when one runs out.",
 }

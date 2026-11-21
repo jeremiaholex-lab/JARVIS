@@ -447,3 +447,37 @@ def test_speech_flag_is_reference_counted():
     assert not server.SPEECH_ACTIVE.is_set()
     server._speech_end()          # unbalanced calls must not go negative
     assert server._speech_refs == 0
+
+
+def test_reopening_the_window_replays_the_stored_transcript(ws_env, tmp_path, monkeypatch):
+    """Closing JARVIS and opening her again used to show an empty panel even
+    though SQLite still held every turn - visually indistinguishable from
+    amnesia, so the greeting now carries the transcript back."""
+    from jarvis.agent.memory import Memory
+
+    c, env = ws_env
+    mem = Memory(tmp_path / "memory.db")
+    mem.remember_turn("user", "the elevator code is 9 3 1 4, do not lose it",
+                      engine="local (Gemini 3.5 Flash)")
+    mem.remember_turn("assistant", "Noted. I have pinned it.", engine="local (Gemini 3.5 Flash)")
+    mem.remember_turn("system", "internal note that must not be shown")
+    mem.remember_turn("user", "x" * 5000)
+    monkeypatch.setattr(env.fake, "memory", mem)
+
+    with c.websocket_connect("/ws") as ws:
+        hello = ws.receive_json()
+        assert hello["op"] == "hello"
+        hist = hello["history"]
+        assert [t["role"] for t in hist] == ["user", "assistant", "user"]   # system excluded
+        assert "9 3 1 4" in hist[0]["text"]
+        assert hist[0]["engine"].startswith("local")
+        assert hist[0]["ts"] > 0
+        assert len(hist[-1]["text"]) <= 2000                                 # clipped for the wire
+
+    # The brain's own context seeds from the same rows, so what is on screen is
+    # also what the model can use - and the stored notice reaches neither.
+    with c.websocket_connect("/ws") as ws:
+        hello = ws.receive_json()
+        assert hello["context_turns"] == 3
+        me = next(cl for cl in server.CLIENTS if cl.client_id == hello["client_id"])
+        assert [t["role"] for t in me.history] == ["user", "assistant", "user"]

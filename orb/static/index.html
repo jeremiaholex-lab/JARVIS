@@ -116,6 +116,12 @@ section h2 .mini { font: 400 11px var(--mono); letter-spacing: .04em; color: var
 .msg.assistant .body { color: var(--ink); }
 .msg.error .body { color: var(--bad); }
 .msg.write-confirm .body { color: var(--ink); }
+/* restored from SQLite on reconnect: present, but visibly not today's words */
+.msg.past { opacity: .62; }
+.msg.resume {
+  margin: 2px 0 10px; padding: 8px 10px; border-left: 2px solid var(--line);
+  font: 400 11px/1.5 var(--mono); color: var(--ink-dim);
+}
 .msg.write-confirm .wc-line { font-size: 11px; color: var(--ink-dim); margin-bottom: 2px; }
 .msg.write-confirm .wc-what { font: 500 13px var(--mono); color: var(--brass); }
 .msg.write-confirm .wc-actions { display: flex; gap: 6px; margin-top: 7px; }
@@ -1320,6 +1326,7 @@ function handleOp(m) {
     case "hello":
       settings = m.settings || {};
       wsClientId = m.client_id || null;
+      if (!HUD_MODE && Array.isArray(m.history) && m.history.length) restoreTranscript(m.history);
       fillSettings(settings);
       if (m.wake_diagnostic) updateMicDiagnostic(m.wake_diagnostic);
       if (!HUD_MODE) { loadBrain(); loadWatchers(); }
@@ -1720,6 +1727,31 @@ function addMsg(role, text, engine, isError) {
   const chat = document.getElementById("chat"); chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
 }
+function restoreTranscript(items) {
+  // The panel is empty because the window is new, not because she forgot: play
+  // back what the store holds, dimmed, so closing and reopening is not amnesia.
+  const chat = document.getElementById("chat");
+  if (!chat || chat.querySelector(".msg")) return;
+  const hint = document.getElementById("chathint");
+  if (hint && hint.parentNode) hint.remove();
+  let when = "";
+  try {
+    when = new Date(items[0].ts * 1000).toLocaleString([],
+      { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch (e) { when = ""; }
+  const note = document.createElement("div");
+  note.className = "msg resume";
+  note.textContent = "carried over from memory" + (when ? " — since " + when : "")
+    + " (" + items.length + " turn" + (items.length === 1 ? "" : "s") + ")";
+  chat.appendChild(note);
+  for (const t of items) {
+    addMsg(t.role === "user" ? "user" : "assistant", t.text, t.engine);
+    const last = chat.lastElementChild;
+    if (last) last.classList.add("past");
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+
 function sendTyped(force, id) {
   const inp = document.getElementById(id || "chatinput");
   const t = inp.value.trim(); if (!t) return; inp.value = "";

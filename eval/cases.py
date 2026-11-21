@@ -318,3 +318,26 @@ LIVE_CASES = [
          "missing dependency", "not installed", "dependency", "web search tool isn't available",
          "due to a missing", "install project dependencies"]}},
 ]
+
+# Explicit-keep grammar, appended by the memory-persistence fix: these are the
+# phrasings the pattern used to miss, so the fact stayed only in the episode
+# log and a later asking got "I cannot determine that".
+CASES += [
+    {"id": "keep-do-not-lose-it", "cat": "keep", "check": ("keep",
+        "my building elevator access code is 9 3 1 4, do not lose it",
+        {"expect": "my building elevator access code is 9 3 1 4"},
+        "the owner's real sentence, said on 10 Nov, never pinned")},
+    {"id": "keep-remember-that", "cat": "keep", "check": ("keep",
+        "remember that my wifi password is hunter2", {"expect": "my wifi password is hunter2"})},
+    {"id": "keep-future-reference", "cat": "keep", "check": ("keep",
+        "my passport number is X1234567 for future reference",
+        {"expect": "my passport number is X1234567"})},
+    {"id": "keep-note-this-down", "cat": "keep", "check": ("keep",
+        "my sister's birthday is 3 March - note this down",
+        {"expect": "my sister's birthday is 3 March"})},
+    {"id": "keep-reminder-is-not-a-fact", "cat": "keep", "check": ("keep",
+        "don't forget to take the bins out", {"expect": ""},
+        "a reminder belongs to the reminder path, not the user model")},
+    {"id": "keep-question-is-not-a-fact", "cat": "keep", "check": ("keep",
+        "what is my elevator code? do not lose it", {"expect": ""})},
+]

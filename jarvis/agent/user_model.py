@@ -58,9 +58,68 @@ _EXTRACT_SYSTEM = (
 # jarvis.agent.memory._FACT_RE, kept separate so this module does not depend on
 # the episodic store just to recognise one sentence pattern.
 _EXPLICIT_RE = re.compile(
-    r"^\s*(?:please\s+|hey\s+)?remember(?:\s+that)?\s+(?P<body>.{3,200})$",
+    r"\b(?:please\s+|hey\s+)?remember(?:\s+that)?\s+(?P<body>.{3,200})$",
     re.I,
 )
+
+# ...and the grammars people actually use when they mean the same thing. Live
+# finding: on 10 Nov the owner said "my building elevator access code is
+# 9 3 1 4, do not lose it". It was never pinned, and every later "what is my
+# elevator code?" got "I cannot determine that" - the one sentence that asked
+# to be remembered was the one the pattern could not see.
+_KEEP_MARKER_RE = re.compile(
+    r"\b(?:do\s+not|don'?t|never)\s+(?:you\s+|please\s+)?(?:lose|forget)\b"
+    r"|\b(?:keep|save|note|remember|memoris[e|z]e|store|record)\s+(?:this|that|it|these|them)\b"
+    r"|\b(?:write|jot|put|note)\s+(?:this|that|it)?\s*down\b"
+    r"|\bkeep (?:this |that )?in mind\b"
+    r"|\bfor (?:future|later) reference\b"
+    r"|\bmake (?:a |me an? )?note\b"
+    r"|\b(?:do not|don'?t) lose\b",
+    re.I,
+)
+# The kept clause must actually assert something. "don't forget to take the
+# bins out" is a reminder, not a fact, and belongs to the reminder path.
+_DECLARATIVE_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|needs?|lives?|works?|uses?|prefers?)\b"
+    r"|\bi'?m\b|\bwe'?re\b|\bmy\b|\bmine\b|\d",
+    re.I,
+)
+_TASK_RE = re.compile(r"^\s*(?:to\s|and\s|then\s|please\s)?(?:call|text|email|book|buy|take|send|"
+                      r"pick|drop|pay|fix|run|water|turn|open|close|remind)\b", re.I)
+# ", do not lose it", " - note this down", "for future reference": the marker
+# rides at the end, after a comma, an dash, or no separator at all.
+_CLAUSE_SPLIT_RE = re.compile(r"[;,]|\s+[-\u2013\u2014]\s+|\.\s+(?=[A-Z])")
+_COURTESY_RE = re.compile(r"\s*(?:thanks?|please|ok|okay)\.?\s*$", re.I)
+
+
+def explicit_statement(text: str) -> str:
+    """The fact a message asks to be kept, or '' when it asks for nothing.
+
+    Handles both grammars: a leading "remember that …", and a statement with a
+    keep-marker attached ("…, do not lose it", "for future reference: …"). The
+    marker clause itself is not stored - "my code is 9314, do not lose it"
+    becomes "my code is 9314".
+    """
+    raw = (text or "").strip()
+    if not raw or "?" in raw:
+        return ""
+    head = _EXPLICIT_RE.search(raw)
+    if head:
+        return head.group("body").strip(" .,!?")
+    if not _KEEP_MARKER_RE.search(raw):
+        return ""
+    kept: list[str] = []
+    for clause in _CLAUSE_SPLIT_RE.split(raw):
+        # Strike the marker phrase, keep whatever it was attached to.
+        remainder = _COURTESY_RE.sub("", _KEEP_MARKER_RE.sub(" ", clause))
+        remainder = re.sub(r"\s{2,}", " ", remainder).strip(" .,-")
+        if not remainder or _TASK_RE.match(remainder):
+            continue
+        if len(remainder.split()) >= 2 and _DECLARATIVE_RE.search(remainder):
+            kept.append(remainder)
+    if not kept:
+        return ""
+    return ", ".join(kept)[:200].strip(" .,!?")
 
 
 @dataclass(slots=True)
@@ -267,16 +326,13 @@ class UserModel:
 
     # -- learning --------------------------------------------------------
     def remember_explicit(self, text: str) -> Optional[Fact]:
-        """Pin the fact in an explicit "remember that …" statement.
+        """Pin the fact a message explicitly asks to be kept.
 
         This path costs nothing and never depends on the model being up: the
         user said to keep it, so it is kept, and `pinned` protects it from the
-        prompt budget. Returns None when the text is not such a statement.
+        prompt budget. Returns None when the text asks for nothing.
         """
-        match = _EXPLICIT_RE.match((text or "").strip())
-        if not match:
-            return None
-        body = match.group("body").strip(" .,!?\n")
+        body = explicit_statement(text).strip(" .,!?\n")
         if len(body) < 3:
             return None
         return self.put(_fact_key(body), body, source="explicit", pinned=True)
@@ -374,15 +430,25 @@ def _slug(key: str) -> str:
 
 
 def _fact_key(body: str) -> str:
-    """A stable-ish slot name for a verbatim statement.
+    """A stable slot name for a verbatim statement.
 
-    Extracted facts arrive with a model-chosen key. An explicit "remember …"
-    does not, so the slot is derived from the first content words: re-stating
-    the same preference lands in the same slot instead of accumulating rows.
+    Keyed on what the statement is ABOUT - the words before "is/are" - so that
+    changing a value updates the slot instead of leaving two equally pinned
+    versions alive. Keying on the whole sentence (the old behaviour) meant
+    "my wifi password is hunter2" and "my wifi password is swordfish" got
+    different keys, and both were read back as true.
+
+    Extracted facts arrive with a model-chosen key; an explicit "remember …"
+    does not, so the slot is derived here.
     """
-    words = [w for w in re.findall(r"[a-z0-9']+", (body or "").casefold())
-             if w not in _STOPWORDS]
-    return "-".join(words[:3]) or "note"
+    text = body or ""
+    subject = re.split(r"\b(?:is|are|was|were|will\s+be)\b", text, maxsplit=1, flags=re.I)[0]
+    words = [w for w in re.findall(r"[a-z0-9']+", subject.casefold())
+             if w not in _STOPWORDS and not w.isdigit()]
+    if not words:
+        words = [w for w in re.findall(r"[a-z0-9']+", text.casefold())
+                 if w not in _STOPWORDS and not w.isdigit()]
+    return "-".join(words[:4]) or "note"
 
 
 _STOPWORDS = {"a", "an", "the", "is", "are", "to", "of", "and", "in", "on", "for", "me", "i", "my"}
@@ -400,4 +466,5 @@ def _same_enough(left: str, right: str) -> bool:
     return overlap >= 0.75
 
 
-__all__ = ["UserModel", "Fact", "extract_facts", "MAX_FACTS_IN_PROMPT"]
+__all__ = ["UserModel", "Fact", "extract_facts", "explicit_statement",
+           "MAX_FACTS_IN_PROMPT"]

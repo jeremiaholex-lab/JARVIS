@@ -119,6 +119,11 @@ def run_case(case: dict) -> None:
         got = looks_like_screen_request(utterance)
         if got != spec["expect"]:
             raise AssertionError(f"looks_like_screen_request -> {got}, wanted {spec['expect']}")
+    elif kind == "keep":
+        from jarvis.agent.user_model import explicit_statement
+        got = explicit_statement(utterance)
+        if got != spec["expect"]:
+            raise AssertionError(f"explicit_statement -> {got!r}, wanted {spec['expect']!r}")
     elif kind == "research":
         from jarvis.agent.routing import looks_like_research_request
         got = looks_like_research_request(utterance)

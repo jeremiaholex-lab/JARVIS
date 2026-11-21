@@ -535,6 +535,9 @@ def synthesize(text: str) -> tuple[bytes, float]:
 
 
 _last_voice_backend = "local"
+# Turns replayed to a reconnecting window. The model's own context stays small
+# (Client.history seeds 4); this number is about what the OWNER can see.
+TRANSCRIPT_TURNS = 40
 # Gemini TTS on a free key survives a handful of requests before it 429s.
 _TTS_COOLDOWN_S = 180.0
 _tts_cooldown_until = 0.0
@@ -900,6 +903,10 @@ class Client:
                 self.history = [
                     {"role": t.role, "content": t.content[:300], "engine": t.engine}
                     for t in memory.recent_turns(4)
+                    # Only the two roles that belong in a conversation prompt:
+                    # a stored notice would otherwise be replayed to the model
+                    # as a system instruction.
+                    if t.role in ("user", "assistant") and (t.content or "").strip()
                 ]
             except Exception:
                 _logger.exception("could not load conversation memory")
@@ -1886,11 +1893,26 @@ def build_app():
             open_alerts = [a.as_dict() for a in agent_context().alerts.open_alerts(8)]
         except Exception:
             open_alerts = []
+        # The transcript lives in SQLite, so a reopened window should show it.
+        # Until this, reconnecting (or reloading the WebView) left an empty
+        # panel even though JARVIS still remembered the conversation - which
+        # looked exactly like amnesia.
+        history: list[dict] = []
+        if c.memory is not None:
+            try:
+                for t in c.memory.recent_turns(TRANSCRIPT_TURNS):
+                    text = (t.content or "").strip()
+                    if not text or t.role not in ("user", "assistant"):
+                        continue
+                    history.append({"role": t.role, "text": text[:2000],
+                                    "ts": t.ts, "engine": t.engine})
+            except Exception:
+                _logger.warning("could not load the stored transcript (panel starts empty)")
         c.emit(q, "hello", settings=SETTINGS,
                context_turns=len(c.history), client_id=c.client_id,
                wake_diagnostic=c.diagnostics(),
                tools=[t.name for t in getattr(agent_context(), "tools", [])],
-               alerts=open_alerts)
+               alerts=open_alerts, history=history)
 
         async def start_listening(reason: str) -> None:
             c.listening = True

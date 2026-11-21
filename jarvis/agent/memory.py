@@ -130,15 +130,16 @@ class Memory:
 
     # -- semantic ---------------------------------------------------------
     def maybe_store_fact(self, text: str) -> Optional[str]:
-        """Store an explicit 'remember that …' statement; returns the fact."""
-        statement = (text or "").strip()
-        if "?" in statement:
-            return None
-        m = _FACT_RE.match(statement)
-        if not m:
-            return None
-        body = m.group("body").strip(" .,!?\n")
-        if not body:
+        """Store a statement the owner explicitly asked to keep; return its text.
+
+        The grammar lives in one place (jarvis.agent.user_model.explicit_statement)
+        so the episodic store and the user model cannot disagree about what
+        "do not lose it" means.
+        """
+        from jarvis.agent.user_model import explicit_statement
+
+        body = explicit_statement(text).strip(" .,!?\n")
+        if len(body) < 3:
             return None
         key = body[:60]
         with self._connect() as conn:

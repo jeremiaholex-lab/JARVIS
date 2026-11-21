@@ -1,4 +1,34 @@
 {
+ "keep-do-not-lose-it": {
+  "cat": "keep",
+  "ms": 7.6,
+  "pass": true
+ },
+ "keep-future-reference": {
+  "cat": "keep",
+  "ms": 0.1,
+  "pass": true
+ },
+ "keep-note-this-down": {
+  "cat": "keep",
+  "ms": 0.0,
+  "pass": true
+ },
+ "keep-question-is-not-a-fact": {
+  "cat": "keep",
+  "ms": 0.0,
+  "pass": true
+ },
+ "keep-remember-that": {
+  "cat": "keep",
+  "ms": 0.0,
+  "pass": true
+ },
+ "keep-reminder-is-not-a-fact": {
+  "cat": "keep",
+  "ms": 0.0,
+  "pass": true
+ },
  "live-calendar-route": {
   "cat": "live",
   "pass": true,
@@ -111,7 +141,7 @@
  },
  "recollect-what-told": {
   "cat": "recollect",
-  "ms": 25.9,
+  "ms": 12.4,
   "pass": true
  },
  "research-headlines": {
@@ -161,7 +191,7 @@
  },
  "research-weather": {
   "cat": "research",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "retry-hedge-unanchored": {
@@ -306,7 +336,7 @@
  },
  "screen-looking-at": {
   "cat": "screen",
-  "ms": 1617.5,
+  "ms": 559.6,
   "pass": true
  },
  "screen-lower-display": {
@@ -361,12 +391,12 @@
  },
  "switch-slash-25-alias": {
   "cat": "switch",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "switch-slash-35": {
   "cat": "switch",
-  "ms": 5.4,
+  "ms": 3.7,
   "pass": true
  },
  "switch-slash-agnes": {
@@ -386,7 +416,7 @@
  },
  "switch-slash-lite": {
   "cat": "switch",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "switch-slash-lite-bare": {
@@ -481,7 +511,7 @@
  },
  "turn-explicit-cloud": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "turn-local-fail-cloud": {
@@ -496,27 +526,27 @@
  },
  "turn-recall-tool": {
   "cat": "turn",
-  "ms": 0.3,
+  "ms": 0.1,
   "pass": true
  },
  "turn-screen-steer": {
   "cat": "turn",
-  "ms": 0.2,
+  "ms": 0.1,
   "pass": true
  },
  "turn-simple-local": {
   "cat": "turn",
-  "ms": 7.6,
+  "ms": 5.6,
   "pass": true
  },
  "turn-tool-limit-no-tools-last": {
   "cat": "turn",
-  "ms": 0.4,
+  "ms": 0.3,
   "pass": true
  },
  "turn-tool-roundtrip": {
   "cat": "turn",
-  "ms": 0.3,
+  "ms": 0.2,
   "pass": true
  }
 }

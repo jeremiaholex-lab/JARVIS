@@ -119,6 +119,11 @@ def run_case(case: dict) -> None:
         got = looks_like_screen_request(utterance)
         if got != spec["expect"]:
             raise AssertionError(f"looks_like_screen_request -> {got}, wanted {spec['expect']}")
+    elif kind == "research":
+        from jarvis.agent.routing import looks_like_research_request
+        got = looks_like_research_request(utterance)
+        if got != spec["expect"]:
+            raise AssertionError(f"looks_like_research_request -> {got}, wanted {spec['expect']}")
     elif kind == "nudge":
         got = tool_nudge_needed(utterance, used_tools=spec.get("used_tools", False))
         if got != spec["expect"]:
@@ -228,6 +233,11 @@ def run_live(cases, url: str, timeout_s: float = 240.0):
                 fail = f"engine {engine!r} not {want!r}-prefixed"
             elif len(reply or "") < case["live"].get("reply_min_chars", 1):
                 fail = f"reply too short: {reply!r}"
+            else:
+                for phrase in case["live"].get("reply_not_contains", []):
+                    if phrase.lower() in (reply or "").lower():
+                        fail = f"reply contains {phrase!r}: {reply[:160]!r}"
+                        break
             results.append((case["id"], "live", fail is None, fail or f"{round(time.time()-t0,1)}s"))
     return results
 

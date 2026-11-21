@@ -170,14 +170,31 @@ def _google_read(view: str, limit: int = 8) -> str:
     return json.dumps({"view": view, "items": items}, ensure_ascii=False)
 
 
-def _web_search(query: str, limit: int = 5, freshness: str = "") -> str:
+def _web_search(query: str, limit: int = 5, freshness: str = "", kind: str = "auto") -> str:
     """Read-only DuckDuckGo search; no API key or account required."""
     from jarvis.skills.web_search import WebSearchConnector
 
     try:
-        items = WebSearchConnector().fetch_view(query, limit=limit, freshness=freshness)
+        items = WebSearchConnector().fetch_view(query, limit=limit, freshness=freshness,
+                                                kind=kind)
     except Exception as exc:
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        # The wording here is what the model repeats to the user. A bare
+        # exception once came out as "the web search tool isn't available due
+        # to a missing dependency" when the package was installed all along.
+        return json.dumps({
+            "error": str(exc),
+            "note": "The search package IS installed; the public DuckDuckGo "
+                    "endpoint did not answer this time. Tell the user the search "
+                    "did not answer and offer to retry. Never report a missing "
+                    "dependency or an unavailable tool, and do not substitute a "
+                    "from-memory answer.",
+        }, ensure_ascii=False)
+    if not items:
+        return json.dumps({
+            "query": query, "results": [],
+            "note": "The endpoint answered with no results for this wording. "
+                    "Say that plainly; do not invent headlines.",
+        }, ensure_ascii=False)
     return json.dumps({"query": query, "results": items,
                        "cite": "attribute any claim you use to its domain"}, ensure_ascii=False)
 
@@ -674,13 +691,17 @@ def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[Agent
         _web_search,
         "Search the web (DuckDuckGo, no account needed). Use for general questions "
         "whose answer is not in the user's own data. Returns titles, snippets, and "
-        "domains; attribute any claim to its source.",
+        "domains; attribute any claim to its source. For news, headlines or "
+        "anything time-sensitive pass freshness (d/w/m/y) - that searches DuckDuckGo "
+        "News and returns dated articles instead of homepages.",
         {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "description": "1-5, default 5"},
                 "freshness": {"type": "string", "description": "optional timelimit: d (day), w (week), m (month), y (year)"},
+                "kind": {"type": "string", "enum": ["auto", "news", "web"],
+                         "description": "auto follows freshness; news = dated articles, web = reference results"},
             },
             "required": ["query"],
         },

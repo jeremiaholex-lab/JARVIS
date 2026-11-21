@@ -1,4 +1,29 @@
 {
+ "live-calendar-route": {
+  "cat": "live",
+  "pass": true,
+  "why": null
+ },
+ "live-force-cloud": {
+  "cat": "live",
+  "pass": true,
+  "why": null
+ },
+ "live-greeting": {
+  "cat": "live",
+  "pass": true,
+  "why": null
+ },
+ "live-search-no-dependency-excuse": {
+  "cat": "live",
+  "pass": true,
+  "why": null
+ },
+ "live-time": {
+  "cat": "live",
+  "pass": true,
+  "why": null
+ },
  "nudge-adverb-dodge": {
   "cat": "nudge",
   "ms": 0.0,
@@ -86,7 +111,57 @@
  },
  "recollect-what-told": {
   "cat": "recollect",
-  "ms": 8.2,
+  "ms": 25.9,
+  "pass": true
+ },
+ "research-headlines": {
+  "cat": "research",
+  "ms": 0.1,
+  "pass": true
+ },
+ "research-latest-release": {
+  "cat": "research",
+  "ms": 0.1,
+  "pass": true
+ },
+ "research-own-data": {
+  "cat": "research",
+  "ms": 0.0,
+  "pass": true
+ },
+ "research-own-files": {
+  "cat": "research",
+  "ms": 0.0,
+  "pass": true
+ },
+ "research-prices": {
+  "cat": "research",
+  "ms": 0.1,
+  "pass": true
+ },
+ "research-scores": {
+  "cat": "research",
+  "ms": 0.1,
+  "pass": true
+ },
+ "research-screen": {
+  "cat": "research",
+  "ms": 0.0,
+  "pass": true
+ },
+ "research-self": {
+  "cat": "research",
+  "ms": 0.1,
+  "pass": true
+ },
+ "research-static-fact": {
+  "cat": "research",
+  "ms": 0.1,
+  "pass": true
+ },
+ "research-weather": {
+  "cat": "research",
+  "ms": 0.1,
   "pass": true
  },
  "retry-hedge-unanchored": {
@@ -166,7 +241,7 @@
  },
  "route-longform": {
   "cat": "routing",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "route-math": {
@@ -231,7 +306,7 @@
  },
  "screen-looking-at": {
   "cat": "screen",
-  "ms": 432.0,
+  "ms": 1617.5,
   "pass": true
  },
  "screen-lower-display": {
@@ -286,12 +361,12 @@
  },
  "switch-slash-25-alias": {
   "cat": "switch",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "switch-slash-35": {
   "cat": "switch",
-  "ms": 2.9,
+  "ms": 5.4,
   "pass": true
  },
  "switch-slash-agnes": {
@@ -311,7 +386,7 @@
  },
  "switch-slash-lite": {
   "cat": "switch",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "switch-slash-lite-bare": {
@@ -406,12 +481,12 @@
  },
  "turn-explicit-cloud": {
   "cat": "turn",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "turn-local-fail-cloud": {
   "cat": "turn",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "turn-nudge-loop": {
@@ -421,27 +496,27 @@
  },
  "turn-recall-tool": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.3,
   "pass": true
  },
  "turn-screen-steer": {
   "cat": "turn",
-  "ms": 0.0,
+  "ms": 0.2,
   "pass": true
  },
  "turn-simple-local": {
   "cat": "turn",
-  "ms": 3.3,
+  "ms": 7.6,
   "pass": true
  },
  "turn-tool-limit-no-tools-last": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.4,
   "pass": true
  },
  "turn-tool-roundtrip": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.3,
   "pass": true
  }
 }

@@ -18,8 +18,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
-from .routing import (LOW_CONFIDENCE, Route, _ascii_text, looks_like_screen_request,
-                      needs_retry, route_turn, tool_nudge_needed)
+from .routing import (LOW_CONFIDENCE, Route, _ascii_text, looks_like_research_request,
+                      looks_like_screen_request, needs_retry, route_turn,
+                      tool_nudge_needed)
 
 _logger = logging.getLogger(__name__)
 
@@ -37,7 +38,12 @@ TOOL_GUIDANCE = (
     "You have read-only tools for the user's own data: their projects and "
     "deadlines, their indexed documents, read-only Google mail/calendar/task data, "
     "their Notion notes, a read-only web search, and read-only access to files on "
-    "their computer (read_file, list_dir, search_files). Use a tool "
+    "their computer (read_file, list_dir, search_files). Use web_search for "
+    "anything the outside world decides and time changes - news, headlines, "
+    "prices, weather, releases, scores, who won - because your training data is "
+    "older than today; never date a remembered fact as if it were current. "
+    "If a tool reports an endpoint failure, say the service did not answer - "
+    "never blame a missing dependency or a missing tool. Use a tool "
     "and the current time. Use a tool "
     "whenever the answer depends on that data instead of guessing. Never "
     "invent a fact about the user's projects, files, or schedule. When you "
@@ -197,6 +203,20 @@ def run_turn(
                        "look_at_screen now" + target +
                        "Never answer from imagination about screen contents. "
                        "If the tool says consent is needed, relay that exactly.",
+        })
+    # Same reasoning for facts that move with the world: an unsteered model
+    # answers those from memory in seconds and sounds certain about it.
+    if (tools and not force_cloud
+            and looks_like_research_request(text)
+            and _has_tool(tools, "web_search")):
+        msgs.append({
+            "role": "system",
+            "content": "This depends on the world right now, not on your training "
+                       "data. Call web_search now with a short query, then answer "
+                       "only from what it returns and name the sources. If it "
+                       "returns nothing or an error, say the search endpoint did "
+                       "not answer - do not invent headlines and do not blame a "
+                       "missing dependency.",
         })
     trace: List[dict] = []
     tools_used: List[str] = []

@@ -74,6 +74,34 @@ CASES = [
     {"id": "screen-clean-monitor", "cat": "screen", "check": ("screen", "clean my monitor", {"expect": False})},
     {"id": "screen-window-settings", "cat": "screen", "check": ("screen", "open window settings", {"expect": False})},
 
+    # ---------------------------------------------------- live-facts steering
+    # The bug this pins: "top three technology headlines right now" was answered
+    # from training data in 4 s, confidently and wrongly, without the search
+    # tool being called. Own-data questions must NOT be stolen by search.
+    {"id": "research-headlines", "cat": "research", "check": ("research",
+        "what are the top three technology headlines right now", {"expect": True})},
+    {"id": "research-latest-release", "cat": "research", "check": ("research",
+        "what is the latest python version released", {"expect": True})},
+    {"id": "research-weather", "cat": "research", "check": ("research",
+        "will it rain this afternoon", {"expect": True},
+        "'raining' lives in the pattern; a forecast is not in the weights")},
+    {"id": "research-prices", "cat": "research", "check": ("research",
+        "how much is bitcoin worth today", {"expect": True})},
+    {"id": "research-scores", "cat": "research", "check": ("research",
+        "who won the match last night", {"expect": True})},
+    {"id": "research-own-data", "cat": "research", "check": ("research",
+        "what are my deadlines today", {"expect": False},
+        "the user's own schedule belongs to the project tools, not the web")},
+    {"id": "research-own-files", "cat": "research", "check": ("research",
+        "what is the latest change in my notes", {"expect": False})},
+    {"id": "research-screen", "cat": "research", "check": ("research",
+        "what's on my screen right now", {"expect": False},
+        "two steers must never both claim one turn")},
+    {"id": "research-self", "cat": "research", "check": ("research",
+        "what can you do for me", {"expect": False})},
+    {"id": "research-static-fact", "cat": "research", "check": ("research",
+        "how does a transformer attention layer work", {"expect": False})},
+
     # ------------------------------------------------------------ tool nudge
     {"id": "nudge-cant-access", "cat": "nudge", "check": ("nudge", "I can't access your files",
         {"used_tools": False, "expect": True}, "the live-observed failure phrase")},
@@ -280,4 +308,13 @@ LIVE_CASES = [
      "live": {"expect_route_prefix": "local", "reply_min_chars": 3}},
     {"id": "live-force-cloud", "cat": "live", "utterance": "what is 12 times 7",
      "live": {"force_cloud": True, "expect_route_prefix": "cloud"}},
+    # The reported symptom, pinned end to end: the search package is installed,
+    # so a turn that needs live facts must never blame a "missing dependency".
+    # It passes whether or not DuckDuckGo answers, because an honest "the search
+    # endpoint did not answer" contains none of these phrases.
+    {"id": "live-search-no-dependency-excuse", "cat": "live",
+     "utterance": "what is the top technology headline right now? one short sentence",
+     "live": {"reply_min_chars": 20, "reply_not_contains": [
+         "missing dependency", "not installed", "dependency", "web search tool isn't available",
+         "due to a missing", "install project dependencies"]}},
 ]

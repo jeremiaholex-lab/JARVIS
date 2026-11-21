@@ -42,6 +42,21 @@ NEEDS_USER_DATA = re.compile(
     re.I,
 )
 
+# Questions whose answer lives in the changing outside world rather than in
+# the model's weights or the user's own files. Kept deliberately coarse: a
+# false positive costs one extra search, a false negative costs a confident
+# invention spoken out loud.
+NEEDS_LIVE_FACTS = re.compile(
+    r"\b(news|headlines?|breaking|latest|currently|happening|tonight|this week|"
+    r"this month|today's|weather|forecast|temperature|rain|raining|snow|snowing|"
+    r"price|prices|cost|stock|stocks|market|bitcoin|crypto|exchange rate|"
+    r"score|scores|winner|champion|released|release|launch|launched|announced|"
+    r"announcement|out now|as of)\b|"
+    r"\b(right now|just now|at the moment|these days|this year|last night|"
+    r"yesterday|today)\b",
+    re.I,
+)
+
 # A model that says it will go and look, without calling a tool, has promised
 # an action it is not taking. Live finding: "I will look at your screen and
 # inform you of any errors" was the entire reply.
@@ -92,6 +107,24 @@ def looks_like_screen_request(text: str) -> bool:
         return _impl(text)
     except Exception:
         return False
+
+
+def looks_like_research_request(text: str) -> bool:
+    """Does this question only the outside world can answer right now?
+
+    Live finding: asked for "the top three technology headlines right now" the
+    model answered in 4 s from training data ("...as of late 2025") and never
+    called the search tool sitting in front of it. Questions about facts that
+    move - news, prices, weather, releases, results - are steered to the tool
+    the same way screen questions are, and questions about the user's OWN data
+    are left to the data tools so the two never fight over the same turn.
+    """
+    t = text or ""
+    if not t.strip():
+        return False
+    if NEEDS_USER_DATA.search(t) or looks_like_screen_request(t):
+        return False
+    return bool(NEEDS_LIVE_FACTS.search(t))
 
 
 def tool_nudge_needed(answer: str, *, used_tools: bool) -> bool:

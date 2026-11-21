@@ -1405,7 +1405,11 @@ def build_app():
 
             result = None
             switch = parse_model_switch(text)
-            if switch is not None:
+            if switch == "help":
+                result = SimpleNamespace(answer=SWITCH_CONFIRM["help"],
+                                         engine="command", route_reason="slash help",
+                                         steps=[], tools_used=[])
+            elif switch is not None:
                 pinned = None if switch == "auto" else ctx.ladder.tier(switch)
                 note = ("" if (switch == "auto" or (pinned is not None and pinned.available))
                         else " - note: that provider has no API key in the env yet, "

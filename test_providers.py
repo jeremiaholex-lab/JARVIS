@@ -200,31 +200,39 @@ def test_thinking_budget_rejected_retries_without_it():
     assert "thinkingConfig" not in seen[1]
 
 
-# -------------------------------------------------------------- voice switch
-def test_parse_switch_instruction():
-    assert parse_model_switch("switch to gemini 3.5") == "gemini35"
-    assert parse_model_switch("switch to gemini 3.5 lite") == "gemini25"
-    assert parse_model_switch("switch to gemini 3.5 flash lite") == "gemini25"
-    assert parse_model_switch("use lite") == "gemini25"
-    assert parse_model_switch("go back to lite") == "gemini25"
-    assert parse_model_switch("use gemini 2.5 instead") == "gemini25"  # retired alias
-    assert parse_model_switch("switch to agnes") == "agnes"
-    assert parse_model_switch("go back to the cloud model") == "agnes"
-    assert parse_model_switch("switch to automatic") == "auto"
-    assert parse_model_switch("go back to auto") == "auto"
-    assert parse_model_switch("use the default model") == "auto"
-    assert parse_model_switch("jarvis switch to gemini") == "auto"
-    assert parse_model_switch("fall back to 2.5") == "gemini25"
-    assert parse_model_switch("change your brain to gemini 3.5 flash") == "gemini35"
+# -------------------------------------------------------------- slash switch
+def test_slash_commands_switch():
+    assert parse_model_switch("/3.5") == "gemini35"
+    assert parse_model_switch("/3.5 lite") == "gemini25"
+    assert parse_model_switch("/lite") == "gemini25"
+    assert parse_model_switch("/flash lite") == "gemini25"
+    assert parse_model_switch("/2.5") == "gemini25"       # retired-name alias
+    assert parse_model_switch("/agnes") == "agnes"
+    assert parse_model_switch("/cloud") == "agnes"
+    assert parse_model_switch("/auto") == "auto"
+    assert parse_model_switch("/default") == "auto"
+    assert parse_model_switch("/gemini") == "auto"
+    assert parse_model_switch("/help") == "help"
 
 
-def test_parse_switch_rejects_negations_and_chatter():
-    assert parse_model_switch("don't use gemini 2.5") is None
-    assert parse_model_switch("don't switch to gemini 3.5 lite") is None
-    assert parse_model_switch("stop using agnes") is None
-    assert parse_model_switch("what is gemini 3.5") is None
-    assert parse_model_switch("did i tell you to switch to gemini 2.5 yesterday") is None
-    assert parse_model_switch("tell me a story about a robot") is None
+def test_slash_spoken_and_wake_prefixed():
+    assert parse_model_switch("slash 3.5 lite") == "gemini25"
+    assert parse_model_switch("hey jarvis /3.5") == "gemini35"
+    assert parse_model_switch("jarvis /lite") == "gemini25"
+    assert parse_model_switch("/3.5!") == "gemini35"
+    assert parse_model_switch("/LITE") == "gemini25"
+
+
+def test_nothing_without_the_slash_switches_anymore():
+    """The owner retired the natural-language path on purpose: verbs, bare
+    aliases and questions are all ordinary conversation now."""
+    assert parse_model_switch("switch to gemini 3.5 lite") is None
+    assert parse_model_switch("use agnes") is None
+    assert parse_model_switch("3.5 lite") is None
+    assert parse_model_switch("auto") is None
+    assert parse_model_switch("don't use /3.5") is None  # slash must be the prefix
+    assert parse_model_switch("what is /lite") is None
+    assert parse_model_switch("tell me a joke about a robot") is None
     assert parse_model_switch("") is None
 
 
@@ -263,15 +271,12 @@ def test_openai_body_normalizes_compact_tool_calls():
 
 
 def test_bare_alias_words_switch_without_a_verb():
-    assert parse_model_switch("3.5") == "gemini35"
-    assert parse_model_switch("3.5 lite") == "gemini25"
-    assert parse_model_switch("agnes") == "agnes"
-    assert parse_model_switch("auto") == "auto"
-    assert parse_model_switch("2.5") == "gemini25"      # retired alias
-    assert parse_model_switch("hey jarvis, lite") == "gemini25"
+    """Superseded by the slash ruling - kept as the negative pin."""
+    assert parse_model_switch("3.5") is None
+    assert parse_model_switch("/3.5") == "gemini35"
 
 
 def test_bare_aliases_require_the_whole_message():
     assert parse_model_switch("what is 3.5 lite") is None
     assert parse_model_switch("agnes is nice") is None
-    assert parse_model_switch("3.5 plus 2") is None
+    assert parse_model_switch("/agnes is nice") is None

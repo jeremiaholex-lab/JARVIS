@@ -350,77 +350,43 @@ def _httpx_post(url: str, headers: dict, body: dict, timeout_s: float) -> tuple[
     return r.status_code, data
 
 
-# ------------------------------------------------------------ spoken switching
-_SWITCH_RE = re.compile(
-    r"\b(?:switch|change|move|go|set|make it|use|run|fall back|fallback|stick)\b"
-    r"[^.?!]*?\b(?:to|onto|on|into|back to)?\b[^.?!]*?"
-    r"(?P<target>(?:gemini[\s-]*)?3[\s.,-]*5[\s-]*(?:flash[\s-]*)?lite"
-    r"|\blite\b|(?:gemini[\s-]*)?3[\s.,-]*5|(?:gemini[\s-]*)?2[\s.,-]*5|gemini"
-    r"|agnes|the cloud|cloud model|cloud|the api|auto(?:matic)?(?:ly)?|the default|default)"
-    r"\b", re.I,
-)
-_SWITCH_BACK_RE = re.compile(
-    r"\b(?:switch|change|go back|move|fall back|use)\b[^.?!]*?\bback\b[^.?!]*?"
-    r"(?P<target>gemini[\s-]*3[\s.,-]*5[\s-]*(?:flash[\s-]*)?lite|gemini[\s-]*3[\s.,-]*5"
-    r"|3[.,]5 ?lite|3\.5|\blite\b|auto(?:matic)?|default)\b", re.I,
-)
-
-
-_BARE_ALIASES = {
+# ------------------------------------------------------------- slash switching
+# The owner's ruling: verbs and prose heuristics were a mistake to maintain -
+# a brain switch is SLASH-PREFIXED or it is conversation. "/3.5 lite", typed
+# or spoken ("slash 3.5 lite"; Whisper also emits a literal "/"), does the
+# switch. Nothing else does: no negation guard is even needed any more, and
+# the whole natural-language matcher surface disappeared with it.
+SWITCH_ALIASES = {
     "3.5": "gemini35", "3,5": "gemini35", "35": "gemini35",
-    "gemini": "auto", "gemini 3.5": "gemini35", "3.5 flash": "gemini35",
+    "gemini 3.5": "gemini35", "3.5 flash": "gemini35",
     "gemini 3.5 flash": "gemini35", "flash": "gemini35",
     "lite": "gemini25", "3.5 lite": "gemini25", "gemini 3.5 lite": "gemini25",
     "flash lite": "gemini25", "3.5 flash lite": "gemini25",
     "2.5": "gemini25", "gemini 2.5": "gemini25", "25": "gemini25",
     "agnes": "agnes", "cloud": "agnes", "api": "agnes",
     "auto": "auto", "automatic": "auto", "default": "auto", "chain": "auto",
+    "gemini": "auto",  # bare /gemini cannot pick a key -> the ladder
+    "help": "help", "?": "help", "brains": "help",
 }
 
 
 def parse_model_switch(text: str) -> Optional[str]:
-    """Return a tier id or "auto" when the utterance INSTRUCTS a brain change,
-    else None. Conservative: it needs a switch verb or to BE nothing but a
-    known alias, and the host answers with a confirmation so a mis-parse is
-    always audible and reversible by voice."""
+    """Return a tier id, "auto" or "help" ONLY for a slash command, else None.
+
+    Accepted shapes: "/<alias>", "slash <alias>" (the spoken form), with an
+    optional leading wake word and trailing punctuation. Everything else is
+    an ordinary turn - there is deliberately no natural-language path.
+    """
     t = re.sub(r"\s+", " ", (text or "").strip().lower())
     if not t:
         return None
-    # Whole-message aliases: typing exactly "3.5 lite" / "agnes" / "auto" is
-    # a command. The utterance must CONSIST of the alias (wake word and
-    # punctuation allowed), so "what do you think of 3.5" stays chat.
-    bare = re.sub(r"[?!.:,;\"']+$", "", t)
-    bare = re.sub(r"^(?:hey[ ,]+)?jarvis[ ,]+", "", bare).strip()
-    if bare in _BARE_ALIASES:
-        return _BARE_ALIASES[bare]
-    if len(t.split()) > 14:
+    t = re.sub(r"^(?:hey[ ,]+)?jarvis[ ,]+", "", t).strip()
+    t = re.sub(r"^slash[\s-]*", "/", t)  # "slash 3.5 lite" == "/3.5 lite"
+    if not t.startswith("/"):
         return None
-    # An instruction never negates itself: "don't use gemini 2.5" and "stop
-    # using agnes" must not flip to the very tier they mention.
-    if re.search(r"\b(?:don'?t|do not|never|stop|quit|avoid|not)\b", t):
-        return None
-    # Questions are not instructions: "did i tell you to switch to gemini 2.5"
-    # must not flip the brain; a spoken command starts with the verb.
-    if re.match(r"^(?:what|why|how|when|where|who|did|do|does|is|are|should)\b", t):
-        return None
-    m = _SWITCH_BACK_RE.search(t) or _SWITCH_RE.search(t)
-    if not m:
-        return None
-    target = m.group("target")
-    # "switch to gemini" alone is ambiguous between the two keys -> auto
-    if re.fullmatch(r"gemini", target.strip()):
-        return "auto"
-    # "lite" BEFORE "3": "gemini 3.5 lite" contains a 3 but names the Lite
-    # slot; ordering the checks this way is the whole disambiguation.
-    if "lite" in target:
-        return "gemini25"
-    if "3" in target:
-        return "gemini35"
-    if "2" in target:  # retired name still addresses the slot it created
-        return "gemini25"
-    if re.search(r"agnes|cloud|api", target):
-        return "agnes"
-    return "auto"
+    alias = re.sub(r"[?!.:,;\"']+$", "", t[1:]).strip()
+    alias = re.sub(r"\s+", " ", alias)
+    return SWITCH_ALIASES.get(alias)
 
 
 SWITCH_CONFIRM = {
@@ -428,4 +394,6 @@ SWITCH_CONFIRM = {
     "gemini25": "Switched. I'll lead with Gemini 3.5 Lite now.",
     "agnes": "Switched. I'll use Agnes now.",
     "auto": "Back to automatic: Gemini 3.5 Flash first, then 3.5 Lite, then Agnes when one runs out.",
+    "help": ("Slash commands: /3.5 for Gemini 3.5 Flash, /lite for 3.5 Lite, "
+             "/agnes for Agnes, /auto to run the chain in order."),
 }

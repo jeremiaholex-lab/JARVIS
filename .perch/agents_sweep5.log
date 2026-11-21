@@ -1,0 +1,17 @@
+........................................................................ [ 10%]
+........................................................................ [ 20%]
+........................................................................ [ 30%]
+........................................................................ [ 40%]
+........................................................................ [ 50%]
+........................................................................ [ 60%]
+........................................................................ [ 70%]
+........................................................................ [ 80%]
+........................................................................ [ 90%]
+......................................................................   [100%]
+============================== warnings summary ===============================
+openjarvis_runtime\.venv\Lib\site-packages\torch\cuda\__init__.py:64
+  C:\Users\HP\Desktop\Projects\JARVIS\openjarvis_runtime\.venv\Lib\site-packages\torch\cuda\__init__.py:64: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+    import pynvml  # type: ignore[import]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+718 passed, 1 warning in 106.04s (0:01:46)

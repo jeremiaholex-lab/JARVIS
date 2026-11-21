@@ -25,6 +25,7 @@ behaviour, never a reason to disable the assistant.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -165,8 +166,39 @@ class MemoryGovernor:
     def allow_post_turn_learning(self) -> bool:
         return not self.is_warn()
 
+    def allow_embedding_backfill(self) -> bool:
+        """Index building loads a second model into Ollama for the duration
+        of each batch. Every batch is small, but on a machine that has
+        already OOM-killed the backend the right question is not "is this
+        batch cheap" - it is "is there headroom at all". ok-state only.
+        """
+        return not self.is_warn()
+
     def status(self) -> dict:
         return self.pressure().as_dict()
 
 
-__all__ = ["MemoryGovernor", "Pressure", "OK", "WARN", "CRITICAL", "default_sampler"]
+_DEFAULT: MemoryGovernor | None = None
+_DEFAULT_LOCK = threading.Lock()
+
+
+def default_governor() -> MemoryGovernor:
+    """The one governor per process. Hosts that build their own (the orb
+    exposes a lazily-created one through the same env knobs) share this
+    function so tool code and host code read the SAME measured state -
+    two governors sampling the same box can otherwise disagree and one
+    of them is lying.
+    """
+    global _DEFAULT
+    if _DEFAULT is None:
+        with _DEFAULT_LOCK:
+            if _DEFAULT is None:
+                _DEFAULT = MemoryGovernor(
+                    warn_gb=float(os.environ.get("JARVIS_MEM_WARN_GB", 1.6)),
+                    critical_gb=float(os.environ.get("JARVIS_MEM_CRITICAL_GB", 0.9)),
+                )
+    return _DEFAULT
+
+
+__all__ = ["MemoryGovernor", "Pressure", "OK", "WARN", "CRITICAL", "default_sampler",
+           "default_governor"]

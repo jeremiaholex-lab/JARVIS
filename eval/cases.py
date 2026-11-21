@@ -75,6 +75,14 @@ CASES = [
     # ------------------------------------------------------------ tool nudge
     {"id": "nudge-cant-access", "cat": "nudge", "check": ("nudge", "I can't access your files",
         {"used_tools": False, "expect": True}, "the live-observed failure phrase")},
+    {"id": "nudge-cannot-determine", "cat": "nudge", "check": ("nudge",
+        "I cannot determine your building access code from public information",
+        {"used_tools": False, "expect": True},
+        "the dodge the local model actually produced on a recall turn")},
+    {"id": "nudge-adverb-dodge", "cat": "nudge", "check": ("nudge",
+        "I cannot directly access or retrieve building elevator access codes",
+        {"used_tools": False, "expect": True},
+        "a one-word adverb must not hide the same dodge")},
     {"id": "nudge-not-able", "cat": "nudge", "check": ("nudge", "I wasn't able to find that in your memory",
         {"used_tools": False, "expect": True})},
     {"id": "nudge-cannot-see", "cat": "nudge", "check": ("nudge", "I cannot see that document",
@@ -107,6 +115,8 @@ CASES = [
     {"id": "tier-shell-ls", "cat": "tier", "check": ("tier", "shell_exec", {"params": {"command": "ls"}, "expect": "write"})},
     {"id": "tier-shell-rm", "cat": "tier", "check": ("tier", "shell_exec", {"params": {"command": "rm -rf /tmp/x"}, "expect": "destructive"})},
     {"id": "tier-look-screen", "cat": "tier", "check": ("tier", "look_at_screen", {"expect": "read"})},
+    {"id": "tier-recall-memory", "cat": "tier", "check": ("tier", "recall_memory", {"params": {"query": "x"}, "expect": "read"},
+        "semantic recall reads the episode store; it writes nothing")},
     {"id": "tier-list-windows", "cat": "tier", "check": ("tier", "list_open_windows", {"expect": "read"})},
     {"id": "tier-projects-write", "cat": "tier", "check": ("tier", "jarvis_projects_write",
         {"params": {"action": "add_project"}, "expect": "write"})},
@@ -120,6 +130,26 @@ CASES = [
         "enqueues a bounded read-only task; the task tier is enforced separately")},
     {"id": "tier-unknown-default", "cat": "tier", "check": ("tier", "mystery_tool", {"expect": "write"},
         "unknown tools never default to free")},
+
+    # --------------------------------------------------------- recollection
+    {"id": "recollect-what-told", "cat": "recollect", "check": ("recollect",
+        "what did I tell you about the lease", {"expect": True})},
+    {"id": "recollect-remember", "cat": "recollect", "check": ("recollect",
+        "do you remember my elevator code", {"expect": True})},
+    {"id": "recollect-my-code", "cat": "recollect", "check": ("recollect",
+        "what is my access code", {"expect": True})},
+    {"id": "recollect-did-we-talk", "cat": "recollect", "check": ("recollect",
+        "did we talk about the oracle deadline", {"expect": True})},
+    {"id": "recollect-remind-what", "cat": "recollect", "check": ("recollect",
+        "remind me what we decided last time", {"expect": True})},
+    {"id": "recollect-tallest", "cat": "recollect", "check": ("recollect",
+        "what is the tallest building", {"expect": False}, "no past reference: no recall spend")},
+    {"id": "recollect-future-reminder", "cat": "recollect", "check": ("recollect",
+        "remind me to call mom at five", {"expect": False})},
+    {"id": "recollect-weather", "cat": "recollect", "check": ("recollect",
+        "what's the weather", {"expect": False})},
+    {"id": "recollect-brightness", "cat": "recollect", "check": ("recollect",
+        "turn up the screen brightness", {"expect": False})},
 
     # ------------------------------------------------- scripted full turns
     {
@@ -195,6 +225,19 @@ CASES = [
                 {"engine": "cloud", "content": "Lyon."},
             ],
             "expect": {"engine_prefix": "cloud (escalated)", "answer": "Lyon."},
+        }),
+    },
+    {
+        "id": "turn-recall-tool", "cat": "turn",
+        "check": ("turn", "what did I tell you about the lease", {
+            "tools": ["recall_memory"],
+            "script": [
+                {"tool_calls": [{"id": "1", "name": "recall_memory",
+                                 "arguments": "{\"query\": \"lease\"}"}]},
+                {"content": "You said the lease renews on the first."},
+            ],
+            "expect": {"tools_used": ["recall_memory"],
+                       "answer_contains": "renews on the first"},
         }),
     },
 ]

@@ -105,14 +105,19 @@ class Memory:
             conn.close()
 
     # -- episodic ---------------------------------------------------------
-    def remember_turn(self, role: str, content: str, *, engine: str = "", route_reason: str = "") -> None:
+    def remember_turn(self, role: str, content: str, *, engine: str = "", route_reason: str = "") -> Optional[int]:
+        """Persist one episode; returns its row id (or None when rejected).
+
+        The id is what the semantic tier keys its vector on, so callers that
+        want immediate embedding can hand it straight over."""
         if role not in ("user", "assistant") or not content:
-            return
+            return None
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO episodes(ts, role, content, engine, route_reason) VALUES (?,?,?,?,?)",
                 (time.time(), role, content[:4000], engine, route_reason),
             )
+            return int(cur.lastrowid)
 
     def recent_turns(self, limit: int = 12) -> list[Turn]:
         with self._connect() as conn:

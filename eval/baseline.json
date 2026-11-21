@@ -1,4 +1,14 @@
 {
+ "nudge-adverb-dodge": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
+ "nudge-cannot-determine": {
+  "cat": "nudge",
+  "ms": 0.0,
+  "pass": true
+ },
  "nudge-cannot-see": {
   "cat": "nudge",
   "ms": 0.0,
@@ -34,6 +44,51 @@
   "ms": 0.0,
   "pass": true
  },
+ "recollect-brightness": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-did-we-talk": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-future-reminder": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-my-code": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-remember": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-remind-what": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-tallest": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-weather": {
+  "cat": "recollect",
+  "ms": 0.0,
+  "pass": true
+ },
+ "recollect-what-told": {
+  "cat": "recollect",
+  "ms": 27.0,
+  "pass": true
+ },
  "retry-hedge-unanchored": {
   "cat": "retry",
   "ms": 0.0,
@@ -61,7 +116,7 @@
  },
  "route-analyze": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "route-calendar": {
@@ -76,7 +131,7 @@
  },
  "route-explain": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "route-explicit-cloud": {
@@ -101,17 +156,17 @@
  },
  "route-greeting": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "route-joke": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "route-longform": {
   "cat": "routing",
-  "ms": 0.7,
+  "ms": 0.4,
   "pass": true
  },
  "route-math": {
@@ -126,7 +181,7 @@
  },
  "route-reminder": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "route-slow-local": {
@@ -146,7 +201,7 @@
  },
  "route-time": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "route-weather": {
@@ -156,7 +211,7 @@
  },
  "route-weekly-summary": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "screen-brightness": {
@@ -171,12 +226,12 @@
  },
  "screen-earlier-error": {
   "cat": "screen",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "screen-looking-at": {
   "cat": "screen",
-  "ms": 1137.8,
+  "ms": 843.9,
   "pass": true
  },
  "screen-lower-display": {
@@ -186,12 +241,12 @@
  },
  "screen-on-screen": {
   "cat": "screen",
-  "ms": 0.2,
+  "ms": 0.0,
   "pass": true
  },
  "screen-read-window": {
   "cat": "screen",
-  "ms": 0.5,
+  "ms": 0.0,
   "pass": true
  },
  "screen-see-window": {
@@ -249,6 +304,11 @@
   "ms": 0.0,
   "pass": true
  },
+ "tier-recall-memory": {
+  "cat": "tier",
+  "ms": 0.0,
+  "pass": true
+ },
  "tier-sandbox": {
   "cat": "tier",
   "ms": 0.0,
@@ -281,42 +341,47 @@
  },
  "turn-complexity-cloud-only": {
   "cat": "turn",
-  "ms": 0.2,
+  "ms": 0.1,
   "pass": true
  },
  "turn-confidence-escalation": {
   "cat": "turn",
-  "ms": 0.2,
+  "ms": 0.1,
   "pass": true
  },
  "turn-local-fail-cloud": {
   "cat": "turn",
-  "ms": 0.2,
+  "ms": 0.1,
   "pass": true
  },
  "turn-nudge-loop": {
   "cat": "turn",
-  "ms": 0.4,
+  "ms": 0.1,
+  "pass": true
+ },
+ "turn-recall-tool": {
+  "cat": "turn",
+  "ms": 0.1,
   "pass": true
  },
  "turn-screen-steer": {
   "cat": "turn",
-  "ms": 0.2,
+  "ms": 0.1,
   "pass": true
  },
  "turn-simple-local": {
   "cat": "turn",
-  "ms": 29.3,
+  "ms": 6.6,
   "pass": true
  },
  "turn-tool-limit-no-tools-last": {
   "cat": "turn",
-  "ms": 0.7,
+  "ms": 0.2,
   "pass": true
  },
  "turn-tool-roundtrip": {
   "cat": "turn",
-  "ms": 1.0,
+  "ms": 0.2,
   "pass": true
  }
 }

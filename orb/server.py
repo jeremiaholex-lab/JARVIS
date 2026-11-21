@@ -401,14 +401,12 @@ _GOVERNOR = None
 
 
 def _governor():
-    """Lazily built memory governor (see jarvis.agent.governor)."""
-    from jarvis.agent.governor import MemoryGovernor
+    """The process-wide governor (jarvis.agent.governor), host-spelled so
+    tests can inject a scripted one via server._GOVERNOR."""
     global _GOVERNOR
     if _GOVERNOR is None:
-        _GOVERNOR = MemoryGovernor(
-            warn_gb=float(os.environ.get("JARVIS_MEM_WARN_GB", 1.6)),
-            critical_gb=float(os.environ.get("JARVIS_MEM_CRITICAL_GB", 0.9)),
-        )
+        from jarvis.agent.governor import default_governor
+        _GOVERNOR = default_governor()
     return _GOVERNOR
 
 
@@ -543,6 +541,13 @@ class AgentContext:
         self.memory = Memory(db)
         self.user_model = UserModel(db)
         configure_user_model(self.user_model)
+        # Semantic tier over the same episodic file: lazy vectors, filled by
+        # the background loop, read once per turn (roadmap #5). The gate keeps
+        # a recall question from loading an embedding model on a machine that
+        # is already short on RAM - lexical fallback instead.
+        from jarvis.agent.semantic import SemanticMemory
+        self.semantic = SemanticMemory(self.memory.db_path,
+                                       lexical_gate=lambda: _governor().is_warn())
         from jarvis.agent.file_watchers import FileWatcherManager
         self.watchers = FileWatcherManager(
             governance_home() / "agent_tasks.db", _task_store().create,
@@ -934,8 +939,11 @@ async def _durable_task_loop(app):
     """
     runner = _task_runner()
     _task_schedules()
-    watchers = agent_context().watchers
+    ctx = agent_context()
+    watchers = ctx.watchers
+    semantic = getattr(ctx, "semantic", None)
     last_state = None
+    tick = 0
     while True:
         try:
             gov = _governor()
@@ -950,9 +958,15 @@ async def _durable_task_loop(app):
             if gov.allow_background_work():
                 await asyncio.to_thread(_pump_schedules)
                 await asyncio.to_thread(watchers.poll_once)
+                # Semantic ingestion runs here, not in the turn: an episode
+                # becomes searchable seconds later, but a slow or absent
+                # embedder can never delay a spoken answer (roadmap #5).
+                if semantic is not None and tick % 5 == 0 and gov.allow_embedding_backfill():
+                    await asyncio.to_thread(semantic.backfill, 16)
                 task = await asyncio.to_thread(runner.run_once)
             else:
                 task = None
+            tick += 1
             if task is not None:
                 app.state.last_agent_task = {"id": task.id, "status": task.status}
                 # Emit plan_progress WS event for sub-task completion
@@ -1039,6 +1053,8 @@ def build_app():
                           if MODELS.stage_started else None,
             "voice_ready": MODELS.tts_ready,
             "pressure": _governor().status(),
+            "semantic": (AGENT.semantic.stats()
+                         if AGENT is not None and getattr(AGENT, "semantic", None) else None),
             "settings": SETTINGS,
         })
 
@@ -1371,6 +1387,19 @@ def build_app():
         if model_block:
             system = f"{SYSTEM_PROMPT}\n\n{model_block}"
         try:
+            recalled_block = ""
+            t_rec = time.time()
+            try:
+                from jarvis.agent.semantic import looks_like_recollection
+                if ctx.semantic is not None and looks_like_recollection(text):
+                    hits = await asyncio.to_thread(ctx.semantic.search, text, 4)
+                    recalled_block = ctx.semantic.recall_prompt_block(hits)
+                    trace.append({"name": "recall", "ms": round((time.time() - t_rec) * 1000),
+                                  "payload": {"hits": len(hits)}})
+            except Exception:
+                _logger.debug("semantic recall skipped", exc_info=True)
+            if recalled_block:
+                system = f"{system}\n\n{recalled_block}"
             result = await asyncio.to_thread(
                 run_turn,
                 text,

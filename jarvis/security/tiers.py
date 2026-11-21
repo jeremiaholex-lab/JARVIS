@@ -145,6 +145,8 @@ def classify(action: PlannedAction) -> Tier:
         "ls",
         "cat",
         "jarvis_rag_search",
+        "recall_memory",  # semantic recall over the user's own episode store:
+                          # reads memory.db, writes nothing
         "google_read",
         "web_search",
         "notion_read",

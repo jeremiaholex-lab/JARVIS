@@ -66,6 +66,7 @@ def test_consumers_switch_off_the_right_things():
     assert g.allow_background_work() is True # warn still runs background work
     assert g.allow_proactive_speech() is False
     assert g.allow_post_turn_learning() is False
+    assert g.allow_embedding_backfill() is False
     g = gov(0.5)                             # critical
     g.pressure()
     assert g.allow_background_work() is False
@@ -78,6 +79,7 @@ def test_ok_state_is_the_untouched_default():
     assert g.allow_background_work() is True
     assert g.allow_proactive_speech() is True
     assert g.allow_post_turn_learning() is True
+    assert g.allow_embedding_backfill() is True
 
 
 def test_sample_interval_bounds_the_syscall():

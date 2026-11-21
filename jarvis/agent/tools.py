@@ -100,6 +100,41 @@ def _projects_read(view: str, project_name: str = "") -> str:
     return json.dumps({"error": "view must be projects, deadlines, or due_soon"})
 
 
+def _recall_memory(query: str, top_k: int = 4) -> str:
+    """Semantic search over past conversations (roadmap #5).
+
+    Reads the same shared memory.db every host writes, through the lazily
+    built module singleton; a machine without episodic data just gets an
+    empty result, never an exception that would surface in a spoken turn."""
+    global _SEM_CACHE
+    try:
+        if _SEM_CACHE is None:
+            from jarvis.agent.memory import shared_memory_path
+            from jarvis.agent.semantic import SemanticMemory
+
+            def _no_headroom() -> bool:
+                from jarvis.agent.governor import default_governor
+                return default_governor().is_warn()
+
+            _SEM_CACHE = SemanticMemory(shared_memory_path(), lexical_gate=_no_headroom)
+        sem = _SEM_CACHE
+        hits = sem.search(query, k=max(1, min(int(top_k or 4), 8)))
+    except Exception as exc:
+        return json.dumps({"error": f"memory search unavailable: {exc.__class__.__name__}"})
+    if not hits:
+        return json.dumps({"results": [], "note": "nothing relevant in past conversations"})
+    import time as _t
+    return json.dumps({
+        "results": [{"when": _t.strftime("%Y-%m-%d", _t.localtime(h.ts)),
+                     "speaker": h.role, "text": h.text, "score": round(h.score, 3)}
+                    for h in hits],
+        "note": "old fragments, may be outdated; only use what clearly answers the question",
+    }, ensure_ascii=False)
+
+
+_SEM_CACHE = None
+
+
 def _rag_search(query: str, top_k: int = 3) -> str:
     from jarvis.rag.setup import ask as rag_ask
 
@@ -601,6 +636,24 @@ def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[Agent
             "required": ["query"],
         },
     )
+    recall = _check_tier(
+        "recall_memory",
+        _recall_memory,
+        "Search PAST CONVERSATIONS (what the user said or what you answered, any day, "
+        "any channel). Use when the user asks what they told you, what you discussed, "
+        "or references an earlier conversation: 'what did I say about the lease', "
+        "'do you remember when we shipped'. Returns dated fragments; treat them as "
+        "leads, not current fact. For the user's *documents*, use jarvis_rag_search "
+        "instead.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer", "description": "1-8, default 4"},
+            },
+            "required": ["query"],
+        },
+    )
     google = _check_tier(
         "google_read",
         _google_read,
@@ -797,7 +850,7 @@ def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[Agent
         "match is ambiguous — it returns the exact titles to target.",
         {"type": "object", "properties": {}},
     )
-    tools.extend([t for t in (projects, rag, google, web, files_read, files_list,
+    tools.extend([t for t in (projects, rag, recall, google, web, files_read, files_list,
                                files_search, notion, task_enqueue, task_status,
                                task_schedule, plan_and_enqueue,
                                file_watch, clock, screen, windows_tool) if t is not None])

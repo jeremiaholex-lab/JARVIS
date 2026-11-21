@@ -77,15 +77,22 @@ def _fnv1a(s: str) -> int:
 
 
 class OllamaEmbedder:
-    """Uses an Ollama embedding model when one is installed."""
+    """Uses an Ollama embedding model when one is installed.
 
-    def __init__(self, model: str) -> None:
+    ``keep_alive`` bounds how long Ollama retains the model in RAM after a
+    call; background indexers on a small machine pass a short value so a
+    300 MB embedding model does not sit resident between ticks."""
+
+    def __init__(self, model: str, keep_alive: Optional[str] = None) -> None:
         self.model = model
+        self.keep_alive = keep_alive
         import urllib.request
 
         self._urllib = urllib.request
 
     def _post(self, payload: dict):
+        if self.keep_alive:
+            payload = {**payload, "keep_alive": self.keep_alive}
         req = self._urllib.Request(
             "http://localhost:11434/api/embed",
             data=json.dumps(payload).encode(),

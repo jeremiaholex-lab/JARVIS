@@ -133,6 +133,11 @@ def run_case(case: dict) -> None:
         want = Tier(spec["expect"])
         if got is not want:
             raise AssertionError(f"classify({utterance}) -> {got.value}, wanted {want.value}")
+    elif kind == "recollect":
+        from jarvis.agent.semantic import looks_like_recollection
+        got = looks_like_recollection(utterance)
+        if got != spec["expect"]:
+            raise AssertionError(f"looks_like_recollection -> {got}, wanted {spec['expect']}")
     elif kind == "turn":
         _run_turn_case(utterance, spec)
     else:

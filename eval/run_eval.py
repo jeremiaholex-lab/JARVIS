@@ -138,6 +138,11 @@ def run_case(case: dict) -> None:
         got = looks_like_recollection(utterance)
         if got != spec["expect"]:
             raise AssertionError(f"looks_like_recollection -> {got}, wanted {spec['expect']}")
+    elif kind == "switch":
+        from jarvis.agent.providers import parse_model_switch
+        got = parse_model_switch(utterance)
+        if got != spec["expect"]:
+            raise AssertionError(f"parse_model_switch -> {got!r}, wanted {spec['expect']!r}")
     elif kind == "turn":
         _run_turn_case(utterance, spec)
     else:

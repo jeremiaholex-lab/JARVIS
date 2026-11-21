@@ -32,22 +32,24 @@ CASES = [
     {"id": "route-math", "cat": "routing", "check": ("route", "what is 12 times 7", {"expect": "local"})},
     {"id": "route-goodmorning", "cat": "routing", "check": ("route", "good morning jarvis", {"expect": "local"})},
     {"id": "route-explain", "cat": "routing", "check": ("route", "explain how a transformer model works", {"expect": "local"})},
-    # Analytical / user-data / long-form requests belong on the cloud.
+    # Analytical / user-data / long-form: the chain leads with a flagship
+    # model and every turn carries tools + recall, so these stay on the ladder.
     {"id": "route-analyze", "cat": "routing", "check": ("route",
         "can you analyze the pros and cons of migrating our database to postgres and write a summary",
-        {"expect": "cloud"})},
+        {"expect": "local"})},
     {"id": "route-weekly-summary", "cat": "routing", "check": ("route",
-        "summarize everything I worked on this week across my projects and emails", {"expect": "cloud"})},
+        "summarize everything I worked on this week across my projects and emails", {"expect": "local"})},
     {"id": "route-calendar", "cat": "routing", "check": ("route",
-        "what do I have on my calendar tomorrow", {"expect": "cloud"})},
+        "what do I have on my calendar tomorrow", {"expect": "local"})},
     {"id": "route-doc-search", "cat": "routing", "check": ("route",
-        "search my documents for the lease agreement", {"expect": "cloud"})},
+        "search my documents for the lease agreement", {"expect": "local"})},
     {"id": "route-explicit-cloud", "cat": "routing", "check": ("route",
         "use the cloud for this one", {"expect": "cloud", "reason": "explicit escalation"})},
-    {"id": "route-longform", "cat": "routing", "check": ("route", LONG_65.strip(), {"expect": "cloud"})},
-    # Degraded-environment switches.
-    {"id": "route-slow-local", "cat": "routing", "check": ("route", "tell me a joke about compilers",
-        {"expect": "cloud", "local_tokens_per_second": 2.1})},
+    {"id": "route-longform", "cat": "routing", "check": ("route", LONG_65.strip(), {"expect": "local"})},
+    # Degraded-environment switches. Model speed is no longer a routing
+    # factor: it existed to dodge a weak local model that has been removed.
+    {"id": "route-slow-ignored", "cat": "routing", "check": ("route", "tell me a joke about compilers",
+        {"expect": "local", "local_tokens_per_second": 2.1})},
     {"id": "route-slow-local-short", "cat": "routing", "check": ("route", "hi there",
         {"expect": "local", "local_tokens_per_second": 2.1},
         "two-word greetings are not worth a cloud round trip")},
@@ -211,9 +213,9 @@ CASES = [
         }),
     },
     {
-        "id": "turn-complexity-cloud-only", "cat": "turn",
-        "check": ("turn", "summarize everything I worked on this week across my projects and emails", {
-            "script": [{"engine": "cloud", "content": "You shipped the orb redesign."}],
+        "id": "turn-explicit-cloud", "cat": "turn",
+        "check": ("turn", "actually, use the cloud model for this one", {
+            "script": [{"engine": "cloud", "content": "Deep answer served."}],
             "expect": {"engine_prefix": "cloud", "no_local_calls": True},
         }),
     },
@@ -240,15 +242,29 @@ CASES = [
                        "answer_contains": "renews on the first"},
         }),
     },
+    # ------------------------------------------------------------ brain switch
+    {"id": "switch-to-35", "cat": "switch", "check": ("switch", "switch to gemini 3.5",
+        {"expect": "gemini35"})},
+    {"id": "switch-to-25", "cat": "switch", "check": ("switch", "use gemini 2.5 instead",
+        {"expect": "gemini25"})},
+    {"id": "switch-to-agnes", "cat": "switch", "check": ("switch", "go back to the cloud model",
+        {"expect": "agnes"})},
+    {"id": "switch-to-auto", "cat": "switch", "check": ("switch", "switch to automatic",
+        {"expect": "auto"})},
+    {"id": "switch-negation", "cat": "switch", "check": ("switch", "don't use gemini 2.5",
+        {"expect": None}, "a negation must never flip the brain")},
+    {"id": "switch-question", "cat": "switch", "check": ("switch", "what is gemini 3.5",
+        {"expect": None})},
+    {"id": "switch-not-an-instruction", "cat": "switch", "check": ("switch",
+        "tell me a joke about a robot", {"expect": None})},
 ]
-
 
 # Optional live checks (only run with --live against the running orb).
 LIVE_CASES = [
     {"id": "live-greeting", "cat": "live", "utterance": "hello, who are you",
      "live": {"expect_route_prefix": "local", "reply_min_chars": 10}},
     {"id": "live-calendar-route", "cat": "live", "utterance": "what do I have on my calendar tomorrow",
-     "live": {"expect_route_prefix": "cloud", "reply_min_chars": 5}},
+     "live": {"expect_route_prefix": "local", "reply_min_chars": 5}},
     {"id": "live-time", "cat": "live", "utterance": "what's the time right now",
      "live": {"expect_route_prefix": "local", "reply_min_chars": 3}},
     {"id": "live-force-cloud", "cat": "live", "utterance": "what is 12 times 7",

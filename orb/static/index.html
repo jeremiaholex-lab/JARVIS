@@ -716,8 +716,8 @@ body:not(.hud) section h2 .mini { font: 400 10px var(--mono); letter-spacing: .0
       <div id="audioDebug">audio: not started</div>
       <div id="micDiag" class="hint" role="status" aria-live="polite">mic diagnostics: waiting for backend</div>
       <div id="agentNote" class="hint">agent: not connected</div>
-      <div class="setrow"><label>Local model</label>
-        <select id="sLocal"></select></div>
+      <div class="setrow"><label>Hosted brains</label>
+        <span class="hint">Gemini 3.5 \u2192 Gemini 2.5 \u2192 Agnes; the pick below pins the lead</span></div>
       <div class="setrow"><label>TTS voice</label>
         <select id="sVoice">
           <option value="af_heart">af_heart (feminine)</option>
@@ -780,7 +780,8 @@ body:not(.hud) section h2 .mini { font: 400 10px var(--mono); letter-spacing: .0
 <footer>
   <span><span class="dot" id="dotWs"></span><span id="wsNote">ws</span></span>
   <span id="stateNote">state: idle</span>
-  <span id="engineNote2">brain: —</span>
+  <span id="engineNote2">brain: loading…</span>
+  <select id="brainPick" onchange="pickBrain(this.value)"></select>
   <span id="errline"></span>
 </footer>
 </div>
@@ -1105,7 +1106,7 @@ function handleOp(m) {
       wsClientId = m.client_id || null;
       fillSettings(settings);
       if (m.wake_diagnostic) updateMicDiagnostic(m.wake_diagnostic);
-      if (!HUD_MODE) { loadModels(); loadWatchers(); }
+      if (!HUD_MODE) { loadBrain(); loadWatchers(); }
       if (m.tools) {
         document.getElementById("agentNote").textContent =
           "agent tools: " + m.tools.join(", ") +
@@ -1174,15 +1175,6 @@ function showErr(msg) {
   if (HUD_MODE) hudNote(msg);
   setTimeout(() => { el.textContent = ""; }, 6000);
 }
-function loadModels() {
-  fetch("/api/ollama-models").then(r => r.json()).then(d => {
-    const sel = document.getElementById("sLocal"); sel.innerHTML = "";
-    (d.models || []).forEach(nm => {
-      const o = document.createElement("option"); o.value = nm; o.textContent = nm; sel.appendChild(o);
-    });
-    sel.value = settings.local_model || sel.value;
-  }).catch(() => {});
-}
 function fillSettings(s) {
   settings = s;
   document.getElementById("sVoice").value = s.voice || "af_heart";
@@ -1199,7 +1191,7 @@ function fillSettings(s) {
   document.getElementById("sTWrite").value = s.tiers?.write || "confirm";
   document.getElementById("sTDestroy").value = s.tiers?.destructive || "hard_gate";
   document.getElementById("sVisionConsent").checked = !!(s.vision && s.vision.cloud_consent);
-  document.getElementById("engineNote2").textContent = "brain: " + (s.local_model || "—");
+  loadBrain();
   renderTierStatus(s);
 }
 function renderTierStatus(s) {
@@ -1213,13 +1205,13 @@ function saveSettings() {
   const tiers = { read: sTRead.value, write: sTWrite.value, destructive: sTDestroy.value };
   const vision = { cloud_consent: document.getElementById("sVisionConsent").checked };
   wsSend("settings", {
-    local_model: sLocal.value, voice: sVoice.value,
+    voice: sVoice.value,
     wake_threshold: Number(sWake.value) / 100,
     vad_tail_s: document.getElementById("sVadTail") ? Number(document.getElementById("sVadTail").value) / 10 : 1.2,
     tiers, vision,
     cloud: { base_url: sCloudUrl.value, model: sCloudModel.value },
   });
-  document.getElementById("engineNote2").textContent = "brain: " + sLocal.value;
+  loadBrain();
   renderTierStatus({ tiers });
   loadP4();
 }
@@ -1855,6 +1847,24 @@ if (HUD_MODE) {
 /* The dedicated window starts its own mic; the HUD is handed ownership by
    the native shell, so those two never capture audio at the same time. */
 if (!HUD_MODE) startMic().catch(() => {});
+function loadBrain() {
+  fetch("/api/model").then(r => r.json()).then(d => {
+    if (!d.tiers) return;
+    const sel = document.getElementById("brainPick");
+    const opts = [["auto", "Auto: " + d.tiers.map(t => t.label).join(" \u2192 ")]]
+      .concat(d.tiers.map(t => [t.id, t.label + (t.available ? "" : " (no key)") + (t.cooling_s > 0 ? " (cooling " + Math.ceil(t.cooling_s) + "s)" : "")]));
+    sel.innerHTML = "";
+    opts.forEach(([v, l]) => { const o = document.createElement("option"); o.value = v; o.textContent = l; sel.appendChild(o); });
+    sel.value = d.preference === "deep" ? "auto" : d.preference;
+    const lead = d.tiers.find(t => t.id === d.preference) || d.tiers[0];
+    document.getElementById("engineNote2").textContent = "brain: " + (d.preference === "auto" ? "auto ladder" : lead.label);
+  }).catch(() => {});
+}
+function pickBrain(v) {
+  fetch("/api/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pref: v }) })
+    .then(r => r.json()).then(() => loadBrain());
+}
+setTimeout(loadBrain, 1200);
 </script>
 </body>
 </html>

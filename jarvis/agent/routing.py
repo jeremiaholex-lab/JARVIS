@@ -128,36 +128,25 @@ def route_turn(
 ) -> Route:
     """Pick the brain for a turn and say why.
 
-    ``local_tokens_per_second`` comes from perf_probe.py: a measured local
-    model that is too slow to hold a conversation is not worth preferring,
-    so routing degrades to the configured cloud engine and states the number.
+    Since the hosted ladder (Gemini 3.5 -> 2.5 -> Agnes, jarvis.agent.
+    providers) replaced the Ollama model, "local" means the normal chain
+    and "cloud" means deliberately switch to the OTHER brain (Agnes): the
+    deep-mode checkbox, an explicit "use the cloud model" request, and the
+    confidence retry inside run_turn. User-data and analytical questions no
+    longer escalate - the chain leads with a flagship model and every turn
+    carries tools and semantic recall anyway. The retired complexity /
+    long-form / slow-local heuristics existed only to dodge a weak 1.7B
+    model; with no weak model they mis-ran good turns.
     """
-    words = len(text.split())
-    slow_local = (
-        local_tokens_per_second is not None
-        and local_tokens_per_second < min_useful_tps
-        and words >= 4
-    )
     if force_cloud:
-        return Route("cloud", "user asked for the cloud answer") if cloud_available else Route(
-            "local", "cloud requested but no key configured"
+        return Route("cloud", "user asked for the other brain") if cloud_available else Route(
+            "local", "cloud requested but no fallback key configured"
         )
     if not cloud_available:
-        return Route("local", "local only (no cloud key configured)")
+        return Route("local", "ladder only (no second-brain key configured)")
     if EXPLICIT_ESCALATION.search(text):
         return Route("cloud", "explicit escalation request")
-    if NEEDS_USER_DATA.search(text):
-        return Route("cloud", "needs your own data, which the local model could not fetch")
-    if COMPLEX_TASK.search(text) and words >= 4:
-        return Route("cloud", "complexity heuristic (analytical or multi-step task)")
-    if slow_local:
-        return Route(
-            "cloud",
-            f"measured local speed {local_tokens_per_second:.1f} tok/s is too slow for speech",
-        )
-    if words > 60:
-        return Route("cloud", "long-form request")
-    return Route("local", "routine request")
+    return Route("local", "ladder: gemini chain")
 
 
 def needs_retry(answer: str, *, words_in_question: int, used_tools: bool = False) -> bool:

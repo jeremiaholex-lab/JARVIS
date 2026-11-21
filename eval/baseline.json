@@ -6,7 +6,7 @@
  },
  "nudge-cannot-determine": {
   "cat": "nudge",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "nudge-cannot-see": {
@@ -16,7 +16,7 @@
  },
  "nudge-cant-access": {
   "cat": "nudge",
-  "ms": 0.0,
+  "ms": 0.1,
   "pass": true
  },
  "nudge-good-answer": {
@@ -86,7 +86,7 @@
  },
  "recollect-what-told": {
   "cat": "recollect",
-  "ms": 27.0,
+  "ms": 20.1,
   "pass": true
  },
  "retry-hedge-unanchored": {
@@ -166,7 +166,7 @@
  },
  "route-longform": {
   "cat": "routing",
-  "ms": 0.4,
+  "ms": 0.1,
   "pass": true
  },
  "route-math": {
@@ -184,9 +184,9 @@
   "ms": 0.0,
   "pass": true
  },
- "route-slow-local": {
+ "route-slow-ignored": {
   "cat": "routing",
-  "ms": 0.1,
+  "ms": 0.0,
   "pass": true
  },
  "route-slow-local-short": {
@@ -231,7 +231,7 @@
  },
  "screen-looking-at": {
   "cat": "screen",
-  "ms": 843.9,
+  "ms": 1328.4,
   "pass": true
  },
  "screen-lower-display": {
@@ -256,7 +256,7 @@
  },
  "screen-weather": {
   "cat": "screen",
-  "ms": 0.0,
+  "ms": 0.2,
   "pass": true
  },
  "screen-which-window": {
@@ -266,6 +266,41 @@
  },
  "screen-window-settings": {
   "cat": "screen",
+  "ms": 0.1,
+  "pass": true
+ },
+ "switch-negation": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
+ "switch-not-an-instruction": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
+ "switch-question": {
+  "cat": "switch",
+  "ms": 0.0,
+  "pass": true
+ },
+ "switch-to-25": {
+  "cat": "switch",
+  "ms": 0.1,
+  "pass": true
+ },
+ "switch-to-35": {
+  "cat": "switch",
+  "ms": 8.6,
+  "pass": true
+ },
+ "switch-to-agnes": {
+  "cat": "switch",
+  "ms": 0.3,
+  "pass": true
+ },
+ "switch-to-auto": {
+  "cat": "switch",
   "ms": 0.0,
   "pass": true
  },
@@ -339,12 +374,12 @@
   "ms": 0.0,
   "pass": true
  },
- "turn-complexity-cloud-only": {
+ "turn-confidence-escalation": {
   "cat": "turn",
   "ms": 0.1,
   "pass": true
  },
- "turn-confidence-escalation": {
+ "turn-explicit-cloud": {
   "cat": "turn",
   "ms": 0.1,
   "pass": true
@@ -361,7 +396,7 @@
  },
  "turn-recall-tool": {
   "cat": "turn",
-  "ms": 0.1,
+  "ms": 0.2,
   "pass": true
  },
  "turn-screen-steer": {
@@ -371,12 +406,12 @@
  },
  "turn-simple-local": {
   "cat": "turn",
-  "ms": 6.6,
+  "ms": 10.6,
   "pass": true
  },
  "turn-tool-limit-no-tools-last": {
   "cat": "turn",
-  "ms": 0.2,
+  "ms": 0.3,
   "pass": true
  },
  "turn-tool-roundtrip": {

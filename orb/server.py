@@ -557,7 +557,8 @@ class AgentContext:
         from jarvis.proactive.alerts import AlertStore
 
         self.alerts = AlertStore(governance_home() / "alerts.db")
-        self.local_tok_s = self._measured_speed()
+        self.local_tok_s = None  # the removed local LLM made this moot; the
+                                 # route no longer weighs local speed
         self.local = None
         self.cloud = None
         self._cloud_key = bool(ENV.get("AGNES_API_KEY"))
@@ -569,6 +570,31 @@ class AgentContext:
             self.local = OllamaEngine()
         except Exception as exc:
             _logger.warning("local engine unavailable: %s", exc)
+        # Hosted brain ladder (roadmap: qwen removed - the owner's words were
+        # "dumb"): Gemini 3.5 key -> Gemini 2.5 key -> Agnes, each 429/timeout
+        # parking its tier briefly, plus a spoken preference. The Ollama
+        # engine above stays ONLY for embeddings (nomic) and the vision
+        # probe; no turn is served by it any more.
+        from jarvis.agent.providers import DEFAULT_TIERS
+        from jarvis.agent.providers import ModelLadder, Tier as ProviderTier
+
+        prov = SETTINGS.get("providers") or {}
+        tiers = []
+        for spec in (prov.get("gemini") or DEFAULT_TIERS):
+            tiers.append(ProviderTier(
+                id=spec["id"], label=spec.get("label", spec["id"]), kind="gemini",
+                model=spec.get("model", ""),
+                key=(ENV.get(spec.get("key_env", "GEMINI_API_KEY"))
+                     or os.environ.get(spec.get("key_env", "GEMINI_API_KEY")) or None)))
+        tiers.append(ProviderTier(
+            id="agnes", label="Agnes", kind="openai",
+            model=SETTINGS["cloud"]["model"],
+            key=ENV.get("AGNES_API_KEY") or os.environ.get("AGNES_API_KEY") or None,
+            base_url=SETTINGS["cloud"]["base_url"]))
+        self.ladder = ModelLadder(tiers, pref_path=governance_home() / "model_pref.json",
+                                  cooldown_s=float(prov.get("cooldown_s", 120)))
+        _logger.info("model ladder: %s", ", ".join(
+            f"{t.label}{'(ready)' if t.available else '(no key)'}" for t in tiers))
 
     def _local_generate(self, msgs, model: str, **kwargs):
         with self._gen_lock:
@@ -635,31 +661,12 @@ class AgentContext:
             return None
 
     def warmup(self) -> None:
-        """Pay Ollama's model-load cost at startup, not on the first question.
+        """No-op since the local LLM was removed; kept because startup calls it.
 
-        A cold local model added ~59s to the first spoken reply; the load is
-        per-model and happens on the first generate() call.
+        Gemini and Agnes are HTTP brains with no per-process model load to
+        prepay; the old cost of this function (warming qwen3) is gone.
         """
-        if self._warmed or self.local is None:
-            return
         self._warmed = True
-
-        def _run() -> None:
-            started = time.time()
-            try:
-                from openjarvis.core.types import Message, Role
-
-                self._local_generate(
-                    [Message(role=Role.USER, content="Reply with the single word: ready")],
-                    model=SETTINGS["local_model"], max_tokens=8, temperature=0.0,
-                    num_ctx=int(SETTINGS.get("local_num_ctx", 4096)),
-                )
-                _logger.info("local model warm in %.1fs", time.time() - started)
-            except Exception as exc:
-                _logger.warning("local model warmup failed (%s: %s)",
-                                exc.__class__.__name__, exc)
-
-        threading.Thread(target=_run, name="jarvis-llm-warmup", daemon=True).start()
 
     def cloud_engine(self):
         if self.cloud is None:
@@ -674,40 +681,20 @@ class AgentContext:
         return bool(ENV.get("AGNES_API_KEY"))
 
     def call_engine(self, engine: str, msgs: list[dict], tools: list[dict] | None) -> dict:
-        """Adapt plain dicts to the framework's Message/ToolCall shapes."""
-        from openjarvis.core.types import Message, Role, ToolCall
+        """One model call through the hosted ladder.
 
-        role_map = {r.value: r for r in Role}
-        converted = []
-        for m in msgs:
-            calls = [
-                ToolCall(id=c.get("id", ""), name=c.get("name", ""),
-                         arguments=c.get("arguments", "{}"))
-                for c in (m.get("tool_calls") or [])
-            ]
-            converted.append(Message(
-                role=role_map.get(m.get("role", "user"), Role.USER),
-                content=m.get("content") or "",
-                tool_calls=calls or None,
-                tool_call_id=m.get("tool_call_id"),
-            ))
-        kwargs: dict = {"temperature": 0.3}
-        # Voice answers are short by design; a smaller local budget is real
-        # seconds saved on a CPU-only laptop.
-        kwargs["max_tokens"] = 400 if engine == "cloud" else 220
-        if tools:
-            kwargs["tools"] = tools
-        if engine == "cloud":
-            return self.cloud_engine().generate(converted, model=SETTINGS["cloud"]["model"], **kwargs)
-        if self.local is None:
-            raise RuntimeError("local engine is not available")
-        # Ollama defaults to a 16k context (engine/ollama.py JARVIS_NUM_CTX),
-        # and the KV cache for it measured ~3.1 GB resident here - on a 15.8 GB
-        # laptop that alone starves Whisper, Kokoro and the rest of the box.
-        # An orb turn is a system prompt, a handful of short turns and one tool
-        # result, so 4k is generous in practice and frees the difference.
-        kwargs["num_ctx"] = int(SETTINGS.get("local_num_ctx", 4096))
-        return self._local_generate(converted, model=SETTINGS["local_model"], **kwargs)
+        run_turn's two engine tokens keep their meaning: "local" is the
+        default chain (Gemini 3.5 -> 2.5 -> Agnes), "cloud" is the deliberate
+        change-of-brain request (deep mode, explicit escalation, confidence
+        retry) which now means Agnes first with Gemini behind it. A rate-
+        limited or down tier falls to the next one inside a single turn.
+        """
+        purpose = "deep" if engine == "cloud" else "standard"
+        tier, resp = self.ladder.call(msgs, tools, purpose=purpose,
+                                      max_tokens=400 if engine == "cloud" else 300)
+        resp["_tier"] = tier.id
+        resp["_label"] = tier.label
+        return resp
 
 
 AGENT = None
@@ -918,7 +905,7 @@ def _process_agent_task(task):
                      if role and role.system_addendum else SYSTEM_PROMPT)
     result = run_turn(
         prompt, system_prompt=system_prompt, tools=schemas, tool_impls=read_tools,
-        call_engine=ctx.call_engine, local_model=SETTINGS["local_model"],
+        call_engine=ctx.call_engine, local_model=ctx.ladder.primary_label(),
         cloud_model=SETTINGS["cloud"]["model"],
         cloud_available=False if task.watch_root else ctx.cloud_available,
         local_tokens_per_second=ctx.local_tok_s, max_tool_rounds=4,
@@ -1053,10 +1040,35 @@ def build_app():
                           if MODELS.stage_started else None,
             "voice_ready": MODELS.tts_ready,
             "pressure": _governor().status(),
+            "ladder": (AGENT.ladder.status() if AGENT is not None and getattr(AGENT, "ladder", None) else None),
             "semantic": (AGENT.semantic.stats()
                          if AGENT is not None and getattr(AGENT, "semantic", None) else None),
             "settings": SETTINGS,
         })
+
+    @app.get("/api/model")
+    def model_get():
+        try:
+            return JSONResponse(agent_context().ladder.status())
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    @app.post("/api/model")
+    async def model_set(request: Request):
+        """Switch the brain preference the same way the voice command does."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "json body required"}, status_code=400)
+        pref = str(body.get("pref", "")).strip().lower()
+        ladder = agent_context().ladder
+        if pref not in ("auto", "deep") and ladder.tier(pref) is None:
+            return JSONResponse({"error": f"unknown model {pref!r}",
+                                 "tiers": [t["id"] for t in ladder.status()["tiers"]]},
+                                status_code=400)
+        ladder.set_preference(pref)
+        _logger.info("model preference switched by API: %s", pref)
+        return JSONResponse(ladder.status())
 
     @app.get("/api/wake")
     def wake_state():
@@ -1387,32 +1399,50 @@ def build_app():
         if model_block:
             system = f"{SYSTEM_PROMPT}\n\n{model_block}"
         try:
-            recalled_block = ""
-            t_rec = time.time()
-            try:
-                from jarvis.agent.semantic import looks_like_recollection
-                if ctx.semantic is not None and looks_like_recollection(text):
-                    hits = await asyncio.to_thread(ctx.semantic.search, text, 4)
-                    recalled_block = ctx.semantic.recall_prompt_block(hits)
-                    trace.append({"name": "recall", "ms": round((time.time() - t_rec) * 1000),
-                                  "payload": {"hits": len(hits)}})
-            except Exception:
-                _logger.debug("semantic recall skipped", exc_info=True)
-            if recalled_block:
-                system = f"{system}\n\n{recalled_block}"
-            result = await asyncio.to_thread(
-                run_turn,
-                text,
-                system_prompt=system,
-                memory=c.history,
-                tools=ctx.schemas,
-                tool_impls=ctx.tools,
-                call_engine=ctx.call_engine,
-                local_model=SETTINGS["local_model"],
-                cloud_model=SETTINGS["cloud"]["model"],
-                cloud_available=ctx.cloud_available,
-                force_cloud=force_cloud,
-                local_tokens_per_second=ctx.local_tok_s,
+            from types import SimpleNamespace
+
+            from jarvis.agent.providers import SWITCH_CONFIRM, parse_model_switch
+
+            result = None
+            switch = parse_model_switch(text)
+            if switch is not None:
+                pinned = None if switch == "auto" else ctx.ladder.tier(switch)
+                note = ("" if (switch == "auto" or (pinned is not None and pinned.available))
+                        else " - note: that provider has no API key in the env yet, "
+                             "so it cannot serve turns until one is added")
+                ctx.ladder.set_preference(switch)
+                _logger.info("model preference switched by voice: %s", switch)
+                result = SimpleNamespace(
+                    answer=SWITCH_CONFIRM.get(switch, "Switched.") + note,
+                    engine="command", route_reason="voice model preference",
+                    steps=[], tools_used=[])
+            if result is None:
+                recalled_block = ""
+                t_rec = time.time()
+                try:
+                    from jarvis.agent.semantic import looks_like_recollection
+                    if ctx.semantic is not None and looks_like_recollection(text):
+                        hits = await asyncio.to_thread(ctx.semantic.search, text, 4)
+                        recalled_block = ctx.semantic.recall_prompt_block(hits)
+                        trace.append({"name": "recall", "ms": round((time.time() - t_rec) * 1000),
+                                      "payload": {"hits": len(hits)}})
+                except Exception:
+                    _logger.debug("semantic recall skipped", exc_info=True)
+                if recalled_block:
+                    system = f"{system}\n\n{recalled_block}"
+                result = await asyncio.to_thread(
+                    run_turn,
+                    text,
+                    system_prompt=system,
+                    memory=c.history,
+                    tools=ctx.schemas,
+                    tool_impls=ctx.tools,
+                    call_engine=ctx.call_engine,
+                    local_model=ctx.ladder.primary_label(),
+                    cloud_model=SETTINGS["cloud"]["model"],
+                    cloud_available=ctx.cloud_available,
+                    force_cloud=force_cloud,
+                    local_tokens_per_second=ctx.local_tok_s,
             )
         except Exception as exc:
             c.emit(q, "error", message=f"No answer ({exc.__class__.__name__}): {exc}")

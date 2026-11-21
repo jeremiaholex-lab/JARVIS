@@ -10,7 +10,7 @@ The orb is the instrument surface: its color and motion show whether JARVIS is l
 - Use tools for local files, project data, indexed documents, web search, Google and Notion reads, screenshots, window lists, browser actions, and time.
 - Queue background work, create cron schedules, watch approved folders, and decompose multi-step goals into dependent tasks.
 - Route each turn between a local Ollama model and a configurable cloud endpoint, with explicit slash-command model preference.
-- Listen through wake-word detection, voice activity detection, and local transcription; speak through hybrid hosted Gemini TTS with local Kokoro fallback.
+- Listen through wake-word detection, voice activity detection, and local transcription; speak through hybrid hosted CrowLLM/Gemini TTS with local Kokoro fallback.
 - Propose writes and file edits through confirmation gates. Nothing is written until the operator confirms.
 - Expose traces, security tiers, skill state, and a hash-chained audit trail in the interface.
 - Run a behavioral eval suite offline to check routing, tool use, memory, and safety decisions.
@@ -80,7 +80,7 @@ Secrets are ignored by Git. Do not commit `.env`, OAuth token files, API keys, m
 - Python 3.12 or newer for the backend.
 - .NET SDK for the C# WebView2 shell.
 - Ollama with a local model such as `qwen3:1.7b` for offline inference.
-- Optional: a configured cloud API key for escalation and hosted Gemini TTS.
+- Optional: a configured cloud API key for escalation and hosted TTS.
 - Optional: connected Google, Notion, Telegram, or Microsoft 365 accounts for those specific tools.
 
 ## Getting started
@@ -155,7 +155,9 @@ The Advanced drawer exposes four trade-offs:
 - **Spoken length:** bounds only what is spoken; full text stays on screen.
 - **Speech rate:** changes playback speed.
 
-Local Kokoro is private and offline but slower on CPU. Hosted Gemini TTS starts smoother and uses less local CPU, but requires a working key and sends reply text to an external provider.
+Local Kokoro is private and offline but slower on CPU. Hosted speech uses less local CPU and starts smoother, but sends reply text to an external provider. Automatic mode prefers CrowLLM when it is configured, then Gemini, then local Kokoro. CrowLLM uses the configured `tts-bruce-en` voice through an OpenAI-compatible speech endpoint.
+
+Configure CrowLLM with `CROWLLM_API_KEY` and optionally `CROWLLM_BASE_URL` in the gitignored local environment. The model and voice live under `crowllm_tts` in `orb/settings.json`. Never commit the key. If a hosted provider fails, is rate limited, or has no key, JARVIS falls back to the local voice. Gemini quota rejections also trigger a temporary cooldown in automatic mode; explicitly selecting Gemini overrides that cooldown, while explicitly selecting CrowLLM always targets CrowLLM.
 
 ### Background work
 

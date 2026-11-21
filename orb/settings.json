@@ -24,5 +24,10 @@
   "local_num_ctx": 4096,
   "vision": {
     "cloud_consent": true
+  },
+  "crowllm_tts": {
+    "base_url": "https://crowllm.com/v1",
+    "model": "tts-bruce-en",
+    "voice": "bruce"
   }
 }

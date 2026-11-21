@@ -240,6 +240,47 @@ def gemini_tts(text: str, *, key: str, voice_id: str = "af_heart",
     return out.getvalue()
 
 
+def crowllm_tts(text: str, *, key: str,
+                base_url: str = "https://crowllm.com/v1",
+                model: str = "tts-bruce-en", post: Optional[Callable] = None,
+                timeout_s: float = 30.0) -> bytes:
+    """Return WAV bytes from a CrowLLM OpenAI-compatible speech endpoint."""
+    import base64
+
+    if not (text or "").strip():
+        return b""
+    body = {"model": model, "input": text, "voice": "bruce",
+            "response_format": "wav"}
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+               "User-Agent": "JARVIS/1.0", "Accept": "audio/wav"}
+    url = base_url.rstrip("/") + "/audio/speech"
+    if post is not None:
+        status, data = post(url, headers, body, timeout_s)
+    else:
+        status, data = _httpx_post(url, headers, body, timeout_s, raw=True)
+    if status == 429:
+        raise RateLimited(_brief(data, "rate limited"))
+    if status >= 400:
+        raise ProviderError(f"crowllm tts {status}: {_brief(data)}")
+    if isinstance(data, (bytes, bytearray)):
+        audio = bytes(data)
+    elif isinstance(data, dict):
+        candidate = data.get("audio") or data.get("data")
+        if isinstance(candidate, dict):
+            candidate = candidate.get("audio") or candidate.get("data")
+        if not isinstance(candidate, str):
+            raise ProviderError("crowllm tts returned no audio")
+        try:
+            audio = base64.b64decode(candidate)
+        except Exception as exc:
+            raise ProviderError("crowllm tts returned invalid audio") from exc
+    else:
+        raise ProviderError("crowllm tts returned no audio")
+    if not audio.startswith(b"RIFF"):
+        raise ProviderError("crowllm tts returned non-WAV audio")
+    return audio
+
+
 def _openai_clean_msgs(msgs: List[dict]) -> List[dict]:
     """Strict OpenAI bodies: strip harness-only keys ("engine") and expand
     the compact {id,name,arguments} tool-call shape the turn loop echoes
@@ -406,14 +447,21 @@ def _brief(data: dict, default: str = "") -> str:
         return default
 
 
-def _httpx_post(url: str, headers: dict, body: dict, timeout_s: float) -> tuple[int, dict]:
+def _httpx_post(url: str, headers: dict, body: dict, timeout_s: float,
+                raw: bool = False) -> tuple[int, dict]:
     import httpx
     try:
-        r = httpx.post(url, headers=headers, json=body, timeout=timeout_s)
+        if raw:
+            with httpx.Client() as client:
+                r = client.post(url, headers=headers, json=body, timeout=timeout_s)
+        else:
+            r = httpx.post(url, headers=headers, json=body, timeout=timeout_s)
     except httpx.TimeoutException as exc:
         raise RateLimited(f"timed out: {exc}") from exc
     except httpx.HTTPError as exc:
         raise ProviderError(f"transport: {exc.__class__.__name__}: {exc}") from exc
+    if raw:
+        return r.status_code, r.content
     try:
         data = r.json()
     except Exception:

@@ -64,8 +64,11 @@ class Tier:
 DEFAULT_TIERS: List[dict] = [
     {"id": "gemini35", "label": "Gemini 3.5 Flash", "kind": "gemini",
      "model": "gemini-3.5-flash", "key_env": "GEMINI_API_KEY"},
-    {"id": "gemini25", "label": "Gemini 2.5 Flash", "kind": "gemini",
-     "model": "gemini-2.5-flash", "key_env": "GEMINI_API_KEY_2"},
+    # the "2.5 slot": the whole 2.5 family is 404 for keys minted after its
+    # retirement, so the second quota pool runs 3.5 Lite - same tier id, so
+    # "switch to 2.5" keeps working by voice exactly as the owner speaks it.
+    {"id": "gemini25", "label": "Gemini 3.5 Lite", "kind": "gemini",
+     "model": "gemini-3.5-flash-lite", "key_env": "GEMINI_API_KEY_2"},
 ]
 
 
@@ -280,8 +283,10 @@ class ModelLadder:
             status, data = self._post(url, headers, body, timeout_s)
             if status == 429:
                 raise RateLimited(_brief(data, "rate limited"))
-            if status == 400 and "thinking" in json.dumps(data)[:400].lower():
-                # some models reject thinkingBudget - retry without it once
+            if status == 400 and "thinkingConfig" in body.get("generationConfig", {}):
+                # Flash-Lite families answer ANY thinkingConfig with a
+                # generic 400 that does not name the field; retry without
+                # it once instead of relying on the error text matching.
                 body["generationConfig"].pop("thinkingConfig", None)
                 status, data = self._post(url, headers, body, timeout_s)
             if status >= 400:
@@ -391,8 +396,8 @@ def parse_model_switch(text: str) -> Optional[str]:
 
 
 SWITCH_CONFIRM = {
-    "gemini35": "Switched. I'll lead with Gemini 3.5 now.",
-    "gemini25": "Switched. I'll lead with Gemini 2.5 now.",
+    "gemini35": "Switched. I'll lead with Gemini 3.5 Flash now.",
+    "gemini25": "Switched. I'll lead with the 2.5 slot - Gemini 3.5 Lite - now.",
     "agnes": "Switched. I'll use Agnes now.",
-    "auto": "Back to automatic: Gemini 3.5 first, then 2.5, then Agnes when one runs out.",
+    "auto": "Back to automatic: Gemini 3.5 Flash first, then 3.5 Lite, then Agnes when one runs out.",
 }

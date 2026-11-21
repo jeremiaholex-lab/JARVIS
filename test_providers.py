@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jarvis.agent.providers import (  # noqa: E402
     ModelLadder, ProviderError, RateLimited, Tier,
-    gemini_body, parse_gemini_response, parse_model_switch,
+    gemini_body, gemini_tts, parse_gemini_response, parse_model_switch,
 )
 
 
@@ -200,6 +200,44 @@ def test_thinking_budget_rejected_retries_without_it():
     assert "thinkingConfig" not in seen[1]
 
 
+def test_thinking_rejection_is_remembered_per_tier():
+    """Flash-Lite 400s on thinkingConfig; paying that wasted round trip on
+    every call is exactly the "it takes ages to answer" the owner hears."""
+    seen = []
+
+    def post(url, headers, body, timeout_s):
+        seen.append(dict(body["generationConfig"]))
+        if len(seen) == 1:
+            return 400, {"error": {"message": "Unsupported setting: thinkingConfig"}}
+        return 200, {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    lad = ladder_with(tier("gemini35"), post=post)
+    lad.call([{"role": "user", "content": "hi"}], None)
+    _t, resp = lad.call([{"role": "user", "content": "again"}], None)
+    assert resp["content"] == "ok"
+    assert "thinkingConfig" not in seen[2]      # second call never sends it
+
+
+def test_thought_signature_round_trips_through_a_tool_call():
+    """Gemini 3.x issues a signature with each functionCall and 400s the
+    tool-result turn that fails to echo it back."""
+    parsed = parse_gemini_response({"candidates": [{"content": {"parts": [
+        {"functionCall": {"name": "jarvis_projects_read", "args": {}},
+         "thoughtSignature": "sig_abc"}]}}]})
+    call = parsed["tool_calls"][0]
+    assert call["thought_signature"] == "sig_abc"
+
+    body = gemini_body([
+        {"role": "user", "content": "list projects"},
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "jarvis_projects_read",
+         "content": json.dumps({"projects": []})},
+    ], [{"function": {"name": "jarvis_projects_read", "description": "",
+                      "parameters": {"type": "object", "properties": {}}}}])
+    echoed = body["contents"][1]["parts"][0]["functionCall"]
+    assert echoed["thoughtSignature"] == "sig_abc"
+
+
 # -------------------------------------------------------------- slash switch
 def test_slash_commands_switch():
     assert parse_model_switch("/3.5") == "gemini35"
@@ -280,3 +318,42 @@ def test_bare_aliases_require_the_whole_message():
     assert parse_model_switch("what is 3.5 lite") is None
     assert parse_model_switch("agnes is nice") is None
     assert parse_model_switch("/agnes is nice") is None
+
+
+# ---------------------------------------------------------------- hosted voice
+def test_gemini_tts_wraps_pcm_in_a_wav():
+    import base64
+    pcm = (np.zeros(24000, dtype=np.int16)).tobytes() if "np" in dir() else b"\x00\x00" * 24000
+    seen = {}
+
+    def post(url, headers, body, timeout_s):
+        seen.update({"url": url, "body": body})
+        return 200, {"candidates": [{"content": {"parts": [
+            {"inlineData": {"mimeType": "audio/L16;codec=pcm;rate=24000",
+                            "data": base64.b64encode(pcm).decode()}}]}}]}
+
+    wav = gemini_tts("Hello there.", key="k", voice_id="af_heart", post=post)
+    assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE"
+    assert seen["url"].endswith("gemini-2.5-flash-preview-tts:generateContent")
+    assert seen["body"]["generationConfig"]["responseModalities"] == ["AUDIO"]
+    # the Kokoro voice id maps to a Gemini preset instead of being dropped
+    assert seen["body"]["generationConfig"]["speechConfig"]["voiceConfig"] == {
+        "prebuiltVoiceConfig": {"voiceName": "Kore"}}
+
+
+def test_gemini_tts_errors_are_ladder_shaped():
+    import base64
+    def post(url, headers, body, timeout_s):
+        if body["contents"][0]["parts"][0]["text"].startswith("rate"):
+            return 429, {"error": {"message": "quota"}}
+        if body["contents"][0]["parts"][0]["text"].startswith("bad"):
+            return 400, {"error": {"message": "voice not found"}}
+        return 200, {"candidates": [{"content": {"parts": []}}]}
+
+    with pytest.raises(RateLimited):
+        gemini_tts("rate me", key="k", post=post)
+    with pytest.raises(ProviderError):
+        gemini_tts("bad voice", key="k", post=post)
+    with pytest.raises(ProviderError):
+        gemini_tts("silent", key="k", post=post)
+    assert gemini_tts("   ", key="k", post=post) == b""

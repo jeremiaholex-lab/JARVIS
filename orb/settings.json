@@ -10,9 +10,17 @@
     "destructive": "hard_gate"
   },
   "voice": "af_heart",
+  "voice_backend": "auto",
+  "voice_pacing": "quick",
+  "speak_max_chars": 0,
   "wake_threshold": 0.4,
   "vad_tail_s": 1.2,
   "stt_beam_size": 5,
+  "followup_window_s": 8.0,
+  "followup_max_streak": 2,
+  "barge_rms_threshold": 0.025,
+  "barge_min_frames": 40,
+  "tts_speed": 1.0,
   "local_num_ctx": 4096,
   "vision": {
     "cloud_consent": true

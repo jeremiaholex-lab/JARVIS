@@ -18,6 +18,28 @@ from typing import List
 DEFAULT_SPEECH_LIMIT = 150
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?]) +")
 
+# Kokoro's English G2P stalls and mis-aligns on the symbols a terminal-style
+# answer is full of: ``/3.5`` produced "words count mismatch" and a 25s chunk
+# for ten seconds of audio. Spelling the useful ones out and dropping the
+# decorative ones keeps the prosody intact and the synthesis cheap.
+_SYMBOL_WORDS = (
+    (re.compile(r"\bslash\s*/", re.I), "slash"),
+    (re.compile(r"/(?=[a-z0-9])", re.I), " slash "),
+    (re.compile(r"[*_`#]"), " "),
+    (re.compile(r"\b(\d)[.,](?=\d)"), r"\1 point "),
+    (re.compile(r"[|]"), " "),
+    (re.compile(r"->|\u2192"), " then "),
+    (re.compile(r"\s+"), " "),
+)
+
+
+def spoken_form(text: str) -> str:
+    """Rewrite answer text into something the voice can read smoothly."""
+    out = " ".join((text or "").split())
+    for pattern, repl in _SYMBOL_WORDS:
+        out = pattern.sub(repl, out)
+    return out.strip()
+
 
 def speech_text(answer: str, limit: int = DEFAULT_SPEECH_LIMIT) -> str:
     """A short spoken version of a longer written answer.
@@ -25,7 +47,7 @@ def speech_text(answer: str, limit: int = DEFAULT_SPEECH_LIMIT) -> str:
     The full text stays on screen; the voice gets the first sentences up to
     `limit`, cut at a sentence boundary rather than mid-word.
     """
-    text = " ".join((answer or "").split())
+    text = spoken_form(answer)
     if not text:
         return ""
     if len(text) <= limit:
@@ -51,7 +73,7 @@ def split_sentences(text: str, limit: int = DEFAULT_SPEECH_LIMIT,
     explicitly want a summary, but the orb uses the default and speaks every
     piece.
     """
-    cleaned = " ".join((text or "").split())
+    cleaned = spoken_form(text)
     if not cleaned:
         return []
 
@@ -84,4 +106,4 @@ def split_sentences(text: str, limit: int = DEFAULT_SPEECH_LIMIT,
     return pieces
 
 
-__all__ = ["speech_text", "split_sentences", "DEFAULT_SPEECH_LIMIT"]
+__all__ = ["speech_text", "split_sentences", "spoken_form", "DEFAULT_SPEECH_LIMIT"]

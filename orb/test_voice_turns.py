@@ -210,6 +210,7 @@ def ws_env(monkeypatch):
     monkeypatch.setitem(server.SETTINGS, "followup_window_s", 8.0)
     monkeypatch.setitem(server.SETTINGS, "followup_max_streak", 2)
     monkeypatch.setitem(server.SETTINGS, "vad_tail_s", 1.2)
+    monkeypatch.setitem(server.SETTINGS, "barge_min_frames", 40)
 
     env = type("Env", (), {"fake": fake, "whisper": whisper, "oww": oww})()
     app = server.build_app()
@@ -266,7 +267,8 @@ def test_playback_done_clears_barge_state_and_opens_followup(ws_env):
 
 
 def test_barge_in_requires_sustained_audio_and_reopens_listening(ws_env):
-    c, _env = ws_env
+    c, env = ws_env
+    env.whisper.text = "hey jarvis"
     with c.websocket_connect("/ws") as ws:
         ws.receive_json()
         client = next(iter(server.CLIENTS))
@@ -279,19 +281,62 @@ def test_barge_in_requires_sustained_audio_and_reopens_listening(ws_env):
         assert client.playback_active is True
         assert client.barge_frames == 0
 
-        for _ in range(3):
+        for _ in range(39):
             ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
         assert client.playback_active is True
-        assert client.barge_frames == 3
+        assert client.barge_frames == 39
 
         ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
-        assert wait_for_op(ws, "state", state="listening")["reason"] == "barge-in"
+        # Confirmation is a background transcription, not a synchronous cut:
+        # the reply keeps playing until the wake phrase is actually heard.
+        m = wait_for_op(ws, "state", state="listening")
+        assert m["reason"] == "barge-in"
         assert client.playback_active is False
         assert client.listening is True
         assert client.barge_candidate == []
-        # Pre-roll includes the quiet frame immediately before speech so the
-        # first word is not clipped at the interruption threshold.
-        assert len(client.buffer) == 1600
+        # Pre-roll holds 1.5s of audio so the first word of the interruption
+        # is not clipped at the threshold.
+        assert len(client.buffer) <= 1.5 * 16000 + 320
+
+
+def test_barge_without_wake_phrase_does_not_cut_off_speech(ws_env):
+    c, env = ws_env
+    env.whisper.text = "some ordinary words"
+    with c.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        client = next(iter(server.CLIENTS))
+        client.playback_active = True
+        client.playback_id = "reply"
+        client.emit(client.queue, "state", state="speaking")
+        loud = np.full(320, 5000, dtype=np.int16)
+        for _ in range(40):
+            ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
+        import time
+        deadline = time.monotonic() + 5
+        while client.barge_checking and time.monotonic() < deadline:
+            time.sleep(0.01)
+        ws.send_json({"op": "mute", "on": True})   # flush: proves no barge happened
+        wait_for_op(ws, "state", state="muted")
+        assert client.playback_active is True
+        assert client.playback_id == "reply"
+        assert client.listening is False
+
+
+def test_stale_playback_ack_does_not_end_new_reply(ws_env):
+    c, _env = ws_env
+    with c.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        client = next(iter(server.CLIENTS))
+        client.playback_active = True
+        client.playback_id = "current"
+        ws.send_json({"op": "playback_done", "id": "old"})
+        ws.send_json({"op": "mute", "on": True})
+        wait_for_op(ws, "state", state="muted")
+        assert client.playback_active is True
+        assert client.playback_id == "current"
+        ws.send_json({"op": "playback_done", "id": "current"})
+        wait_for_op(ws, "state", state="idle")
+        assert client.playback_active is False
 
 
 def test_barge_in_muted_is_ignored(ws_env):
@@ -387,3 +432,18 @@ def test_spoken_no_settles_a_pending_edit_offline(ws_env):
         assert m["approved"] is False
     assert env.fake.edit_calls == [(FE, False, "")]
     assert env.fake.write_calls == []
+
+
+def test_speech_flag_is_reference_counted():
+    """Background work stands down while any reply is being spoken; the flag
+    must clear again even when two surfaces speak at once."""
+    server.SPEECH_ACTIVE.clear()
+    server._speech_begin()
+    server._speech_begin()
+    assert server.SPEECH_ACTIVE.is_set()
+    server._speech_end()
+    assert server.SPEECH_ACTIVE.is_set()
+    server._speech_end()
+    assert not server.SPEECH_ACTIVE.is_set()
+    server._speech_end()          # unbalanced calls must not go negative
+    assert server._speech_refs == 0

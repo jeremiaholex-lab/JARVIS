@@ -230,13 +230,26 @@ def default_settings() -> dict:
         },
         "tiers": {"read": "free", "write": "confirm", "destructive": "hard_gate"},
         "voice": "af_heart",
+        # "auto"/"gemini" speak with Gemini TTS when a key exists (fast, no
+        # CPU); "local" keeps the offline Kokoro voice as the only source.
+        "voice_backend": "auto",
+        # "quick" starts speaking sooner with small pauses between sentences;
+        # "smooth" waits for the whole reply and then plays it gaplessly.
+        "voice_pacing": "quick",
+        # 0 = speak the entire answer. Set a number to bound only the SPOKEN
+        # text; the full reply always stays on screen and in history.
+        "speak_max_chars": 0,
         "wake_threshold": 0.4,
         "vad_tail_s": 1.2,
         "stt_beam_size": 5,
         "followup_window_s": FOLLOWUP_WINDOW_S,
         "followup_max_streak": FOLLOWUP_MAX_STREAK,
         "barge_rms_threshold": 0.025,
-        "barge_min_frames": 4,
+        "barge_min_frames": 40,
+        # Kokoro on this CPU runs slightly slower than realtime; a small rate
+        # bump shortens both the audio and the synthesis work. 1.0 keeps the
+        # voice exactly as recorded; raise it if replies feel slow to finish.
+        "tts_speed": 1.0,
         # Context window handed to Ollama. 4096 is deliberate: see
         # AgentContext.call_engine - the framework default of 16384 reserves a
         # ~3 GB KV cache that this machine cannot spare alongside the voice
@@ -325,6 +338,17 @@ class Models:
         # used to stay "not started" through all of it. Name the phase so a
         # slow boot is diagnosable instead of mysterious.
         self.stage = "importing-libraries"
+        # Kokoro is a torch model; the default thread count follows logical
+        # CPUs. Measured on this 4-core/8-thread laptop, 8 threads made every
+        # chunk ~60% SLOWER than 4 (hyperthread contention on the LSTM), so
+        # pin to physical cores explicitly.
+        try:
+            import psutil
+            import torch
+            physical = psutil.cpu_count(logical=False) or os.cpu_count() or 4
+            torch.set_num_threads(max(1, physical))
+        except Exception:
+            _logger.debug("torch thread pin skipped", exc_info=True)
         from faster_whisper import WhisperModel
         from openjarvis.speech.kokoro_tts import KokoroTTSBackend
         import openwakeword
@@ -375,7 +399,8 @@ class Models:
         """Load Kokoro's model and voice pipeline before the first reply."""
         started = time.time()
         try:
-            self.tts.synthesize("Ready.", voice_id=SETTINGS.get("voice", "af_heart"))
+            self.tts.synthesize("Ready.", voice_id=SETTINGS.get("voice", "af_heart"),
+                                speed=float(SETTINGS.get("tts_speed", 1.0)))
             _logger.info("TTS warmup complete in %.1fs", time.time() - started)
         except Exception:
             _logger.exception("TTS warmup failed; first spoken reply may be slower")
@@ -389,6 +414,31 @@ class Models:
             time.sleep(0.5)
         return self.tts_ready
 
+
+# Set while a reply is being synthesized or played back. Background work is
+# paused for its duration: measured on this machine, a spoken chunk that takes
+# 11.9s alone takes 25.8s when the embedding backfill and proactive cycles are
+# competing for the same four cores, which is exactly the "starts late, then
+# stalls mid-reply" the owner hears.
+SPEECH_ACTIVE = threading.Event()
+_speech_refs = 0
+_speech_lock = threading.Lock()
+
+
+def _speech_begin() -> None:
+    """Mark that the server is producing speech; background work stands down."""
+    global _speech_refs
+    with _speech_lock:
+        _speech_refs += 1
+        SPEECH_ACTIVE.set()
+
+
+def _speech_end() -> None:
+    global _speech_refs
+    with _speech_lock:
+        _speech_refs = max(0, _speech_refs - 1)
+        if _speech_refs == 0:
+            SPEECH_ACTIVE.clear()
 
 MODELS = Models()
 ENV = load_env_file(JARVIS / ".env")
@@ -432,10 +482,73 @@ def run_whisper(audio: np.ndarray) -> tuple[str, float]:
     return text, time.time() - t0
 
 
+def _voice_is_hosted() -> bool:
+    """True when the next piece of speech should go to Gemini TTS."""
+    backend = str(SETTINGS.get("voice_backend", "auto")).lower()
+    if backend not in ("auto", "gemini"):
+        return False
+    if not (ENV.get("GEMINI_API_KEY") or ENV.get("GEMINI_API_KEY_2")):
+        return False
+    # "gemini" is an explicit instruction, so it keeps trying; "auto" rests
+    # after a quota rejection instead of failing a round trip per sentence.
+    if backend == "auto" and time.time() < _tts_cooldown_until:
+        return False
+    return True
+
+
+def voice_status() -> dict:
+    """Which voice actually spoke last, and whether hosted speech is allowed."""
+    return {"backend": _last_voice_backend,
+            "hosted_available": _voice_is_hosted(),
+            "cooldown_s": max(0.0, round(_tts_cooldown_until - time.time(), 1))}
+
+
 def synthesize(text: str) -> tuple[bytes, float]:
+    """Voice for one piece of text: hosted when allowed, local Kokoro otherwise.
+
+    The hosted voice is a network call that spends no local CPU and synthesizes
+    at about realtime; the offline one costs ~0.2s of CPU per character and
+    runs slower than the audio it produces, which is what made replies start
+    late and pause mid-sentence. Local is always the fallback, so a cloud
+    outage or an exhausted quota cannot silence the assistant.
+    """
+    global _last_voice_backend, _tts_cooldown_until
     t0 = time.time()
-    r = MODELS.tts.synthesize(text, voice_id=SETTINGS.get("voice", "af_heart"))
+    key = ENV.get("GEMINI_API_KEY") or ENV.get("GEMINI_API_KEY_2") or ""
+    if _voice_is_hosted():
+        try:
+            from jarvis.agent.providers import RateLimited, gemini_tts
+            wav = gemini_tts(text, key=key, voice_id=SETTINGS.get("voice", "af_heart"))
+            if wav:
+                _last_voice_backend = "gemini"
+                return wav, time.time() - t0
+        except RateLimited:
+            _tts_cooldown_until = time.time() + _TTS_COOLDOWN_S
+            _logger.warning("hosted voice rate-limited; speaking locally for %.0fs",
+                            _TTS_COOLDOWN_S)
+        except Exception as exc:
+            _logger.warning("hosted voice unavailable (%s); speaking with the local voice", exc)
+    _last_voice_backend = "local"
+    r = MODELS.tts.synthesize(text, voice_id=SETTINGS.get("voice", "af_heart"),
+                              speed=float(SETTINGS.get("tts_speed", 1.0)))
     return r.audio, time.time() - t0
+
+
+_last_voice_backend = "local"
+# Gemini TTS on a free key survives a handful of requests before it 429s.
+_TTS_COOLDOWN_S = 180.0
+_tts_cooldown_until = 0.0
+
+
+def _wav_seconds(wav: bytes) -> float:
+    """Duration of a WAV blob; drives a watchdog sized to the real reply."""
+    import io
+    import wave
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as f:
+            return f.getnframes() / f.getframerate()
+    except (EOFError, ValueError, OSError, wave.Error):
+        return 0.0
 
 
 # Connected orb surfaces. The proactive watcher must be able to reach a window
@@ -480,6 +593,38 @@ def speech_text(answer: str, limit: int = 260) -> str:
 def split_sentences(text: str, limit: int = 150) -> list[str]:
     """Re-exported from jarvis.speech (shared with the morning briefing)."""
     return _split_sentences(text, limit)
+
+
+def speech_chunks(answer: str, first_limit: int = 80, chunk_limit: int = 240,
+                  pacing: str = "quick", max_chars: int = 0) -> list[str]:
+    """TTS pieces for one reply.
+
+    Measured on this laptop, a local synthesis call costs ~4s of fixed work
+    plus ~1.0x the audio it produces. That leaves the owner with a genuine
+    trade-off, so it is a setting rather than a guess:
+
+    ``quick``   - short opener (~80 chars), then chunky pieces. First sound
+                  arrives soon; each piece boundary can show a small pause.
+    ``smooth``  - one call for the whole reply. Nothing starts until it is all
+                  generated, but playback then runs without a single gap.
+
+    ``max_chars`` bounds the SPOKEN text (the full answer always stays on
+    screen); 0 means speak everything.
+    """
+    from jarvis.speech import spoken_form
+
+    text = spoken_form(answer)
+    if max_chars and len(text) > max_chars:
+        text = speech_text(text, limit=max_chars)
+        if not text.endswith("…"):
+            text += "…"
+        text += " The rest is on screen."
+    if pacing == "smooth":
+        return [text] if text else []
+    chunks = split_sentences(text, limit=chunk_limit)
+    if chunks and len(chunks[0]) > first_limit:
+        chunks[:1] = split_sentences(chunks[0], limit=first_limit)
+    return chunks
 
 
 async def _learn_about_user(ctx, text: str) -> None:
@@ -740,7 +885,11 @@ class Client:
         self.barge_audio: list[np.ndarray] = []
         self.barge_audio_samples = 0
         self.barge_in = False
+        self.barge_checking = False
+        self.barge_task: asyncio.Task | None = None
         self.playback_active = False
+        self.playback_id: str | None = None
+        self.pending_learning: str | None = None
         self.oww = None
         # Conversation context comes from the persistent store, so a window
         # reload or reconnect does not erase what JARVIS was just told.
@@ -942,14 +1091,17 @@ async def _durable_task_loop(app):
                         client.emit(client.queue, "pressure", **pressure.as_dict())
                     except Exception:
                         pass
-            if gov.allow_background_work():
+            if gov.allow_background_work() and not SPEECH_ACTIVE.is_set():
                 await asyncio.to_thread(_pump_schedules)
                 await asyncio.to_thread(watchers.poll_once)
                 # Semantic ingestion runs here, not in the turn: an episode
                 # becomes searchable seconds later, but a slow or absent
                 # embedder can never delay a spoken answer (roadmap #5).
                 if semantic is not None and tick % 5 == 0 and gov.allow_embedding_backfill():
-                    await asyncio.to_thread(semantic.backfill, 16)
+                    # Small batches: a long backfill run started just before a
+                    # reply cannot be interrupted, and it competes with the
+                    # voice for the same four cores (roadmap #5, #10).
+                    await asyncio.to_thread(semantic.backfill, 4)
                 task = await asyncio.to_thread(runner.run_once)
             else:
                 task = None
@@ -1039,6 +1191,7 @@ def build_app():
             "stage_seconds": round(time.time() - MODELS.stage_started, 1)
                           if MODELS.stage_started else None,
             "voice_ready": MODELS.tts_ready,
+            "voice": voice_status(),
             "pressure": _governor().status(),
             "ladder": (AGENT.ladder.status() if AGENT is not None and getattr(AGENT, "ladder", None) else None),
             "semantic": (AGENT.semantic.stats()
@@ -1379,11 +1532,6 @@ def build_app():
         text = " ".join(s.text.strip() for s in segs).strip()
         return text, time.time() - t0
 
-    def synthesize(text: str) -> tuple[bytes, float]:
-        t0 = time.time()
-        r = MODELS.tts.synthesize(text, voice_id=SETTINGS.get("voice", "af_heart"))
-        return r.audio, time.time() - t0
-
     async def do_turn(c: Client, q, text: str, trace: list[dict], force_cloud: bool) -> None:
         """One agent turn: route -> read-tier tools -> answer -> speak."""
         from jarvis.agent.turn import run_turn
@@ -1493,27 +1641,62 @@ def build_app():
         # diff and requires the typed phrase. Nothing is on disk until then.
         for pe in ctx.pending_edits():
             c.emit(q, "edit_confirm", **pe)
-        # Deriving durable facts costs a model call; do it after the reply has
-        # been spoken, never in front of it — and not under memory pressure.
-        if _governor().allow_post_turn_learning():
-            asyncio.create_task(_learn_about_user(ctx, text))
+        # Learning is deferred until the browser finishes speaking. Running it
+        # here competes for CPU and network while speech is being generated.
+        c.pending_learning = text
+        c.playback_id = uuid.uuid4().hex
+        c.emit(q, "tts_start", id=c.playback_id)
         c.playback_active = True
+        _speech_begin()
         c.barge_frames = 0
         c.barge_candidate.clear()
         c.barge_audio.clear()
         c.barge_audio_samples = 0
         c.emit(q, "state", state="speaking")
         try:
-            # The model is initialized during startup; the warmup is only a
-            # cache hint. Do not hold a completed assistant answer for an
-            # arbitrary warmup timeout before starting its first audio chunk.
             total = 0
+            audio_seconds = 0.0
             tts_ms: list[int] = []
             tts_errors: list[str] = []
-            chunks = split_sentences(answer)
+            flush_index = 0
+            pending: list = []
+            chunks = speech_chunks(answer,
+                                   pacing=str(SETTINGS.get("voice_pacing", "quick")),
+                                   max_chars=int(SETTINGS.get("speak_max_chars", 0) or 0))
+            hosted = _voice_is_hosted()
+            # Hosted synthesis is a network call, so the first few pieces can
+            # be requested at once and handed to the browser in order: the
+            # reply stays buffered ahead of playback, which is what removes
+            # the mid-sentence pauses. The local voice is CPU-bound and stays
+            # strictly piece-by-piece. Prefetch is capped so a very long
+            # answer cannot pull a wall of audio into memory at once.
+            prefetch = 4 if hosted else 0
+            pending = [asyncio.create_task(asyncio.to_thread(synthesize, s))
+                       if i < prefetch else None for i, s in enumerate(chunks)]
+
+            async def _speak(text: str, task=None) -> int:
+                """Synthesize one piece and hand it to the browser."""
+                nonlocal total, audio_seconds, flush_index
+                wav, ms = await (task if task is not None
+                                 else asyncio.to_thread(synthesize, text))
+                if not wav:
+                    return 0
+                total += len(wav)
+                audio_seconds += _wav_seconds(wav)
+                tts_ms.append(round(ms * 1000))
+                for i in range(0, len(wav), 65536):
+                    c.emit_bin(q, wav[i : i + 65536])
+                    await asyncio.sleep(0)
+                # Flush marker: everything sent so far is playable.
+                c.emit(q, "tts_flush", index=flush_index, ms=tts_ms[-1])
+                flush_index += 1
+                return 1
+
             for index, sentence in enumerate(chunks):
                 try:
-                    wav, ms = await asyncio.to_thread(synthesize, sentence)
+                    if await _speak(sentence, pending[index]):
+                        continue
+                    raise RuntimeError("empty audio")
                 except Exception as first_exc:
                     # Punctuation/markdown can upset a TTS frontend. Retry this
                     # chunk with spoken-word-safe text, and never let one bad
@@ -1525,37 +1708,51 @@ def build_app():
                         tts_errors.append(f"chunk {index + 1}: {first_exc}")
                         continue
                     try:
-                        wav, ms = await asyncio.to_thread(synthesize, safe_sentence)
+                        if not await _speak(safe_sentence):
+                            raise RuntimeError("empty audio")
                     except Exception as retry_exc:
                         _logger.warning("TTS chunk %d/%d failed after cleanup: %s", index + 1, len(chunks), retry_exc)
                         tts_errors.append(f"chunk {index + 1}: {retry_exc}")
                         continue
-                total += len(wav)
-                tts_ms.append(round(ms * 1000))
-                for i in range(0, len(wav), 65536):
-                    c.emit_bin(q, wav[i : i + 65536])
-                    await asyncio.sleep(0)
-                # Flush marker: everything sent so far is a playable sentence.
-                c.emit(q, "tts_flush", index=index, ms=tts_ms[-1])
             trace.append({"name": "tts", "ms": sum(tts_ms),
                           "payload": {"bytes": total, "voice": SETTINGS.get("voice"),
-                                      "sentences": len(tts_ms), "chunks_total": len(chunks),
+                                      "backend": _last_voice_backend,
+                                      "sentences": flush_index, "chunks_total": len(chunks),
+                                      "audio_seconds": round(audio_seconds, 2),
                                       "per_sentence_ms": tts_ms, "errors": tts_errors}})
             c.emit(q, "trace", trace=trace)
-            c.emit(q, "tts_done", bytes=total)
-            if tts_errors and not total:
-                c.emit(q, "error", message="Voice could not synthesize this reply. The text is still available in chat.")
-            # A spoken reply resets the silent follow-up streak: the next
-            # grace window after it starts fresh, capped again from zero.
+            c.emit(q, "tts_done", bytes=total, id=c.playback_id)
+            if tts_errors:
+                message = ("Voice could not synthesize this reply." if not total else
+                           "Voice could not synthesize part of this reply.")
+                c.emit(q, "error", message=message + " The full text is still available in chat.")
+            # Keep SPEAKING until the browser confirms playback completion.
             c.followup_streak = 0
-            # Keep the visible state at SPEAKING until the browser confirms
-            # playback completion (or the watchdog recovers a lost event).
+            return audio_seconds
         except Exception as exc:
             _logger.exception("TTS response pipeline failed")
             c.emit(q, "error", message=f"TTS failed: {exc}")
-            c.emit(q, "tts_done", bytes=0)
-            c.playback_active = False
-            c.emit(q, "state", state="idle")
+            c.emit(q, "tts_done", bytes=0, id=c.playback_id)
+            return 0.0
+        finally:
+            for t in pending:
+                if t is not None and not t.done():
+                    t.cancel()
+            _speech_end()
+
+    async def _speak_watchdog(cc: Client, qq, timeout: float) -> None:
+        """Recover if a client disconnects or never acknowledges playback."""
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            return
+        if cc.state in ("thinking", "speaking"):
+            cc.thinking = False
+            cc.playback_active = False
+            cc.playback_id = None
+            cc.pending_learning = None
+            cc.emit(qq, "error", message="Voice playback did not finish. The full reply is available in chat.")
+            cc.emit(qq, "state", state="idle")
 
     # ------------------------------------------------------------ proactive
     # §6.9: JARVIS raises issues on its own. Announcing is read-tier; acting on
@@ -1578,12 +1775,31 @@ def build_app():
                 try:
                     client.emit(client.queue, "chat", role="assistant",
                                 text=alert.text, engine="proactive")
-                    wav, _ms = await asyncio.to_thread(synthesize, speech_text(alert.text))
+                    client.playback_id = uuid.uuid4().hex
+                    client.playback_active = True
+                    client.emit(client.queue, "tts_start", id=client.playback_id)
+                    client.emit(client.queue, "state", state="speaking")
+                    _speech_begin()
+                    try:
+                        wav, _ms = await asyncio.to_thread(synthesize, speech_text(alert.text))
+                    finally:
+                        _speech_end()
+                    # Do not overlap a conversation that began during synthesis.
+                    if client.state != "idle" or client.playback_active:
+                        continue
+                    client.playback_id = uuid.uuid4().hex
+                    client.playback_active = True
+                    client.emit(client.queue, "tts_start", id=client.playback_id)
+                    client.emit(client.queue, "state", state="speaking")
                     for i in range(0, len(wav), 65536):
                         client.emit_bin(client.queue, wav[i : i + 65536])
                         await asyncio.sleep(0)
                     client.emit(client.queue, "tts_flush", index=0, ms=0)
-                    client.emit(client.queue, "tts_done", bytes=len(wav))
+                    client.emit(client.queue, "tts_done", bytes=len(wav), id=client.playback_id)
+                    if client.playback_active:
+                        if client.watchdog:
+                            client.watchdog.cancel()
+                        client.watchdog = asyncio.create_task(_speak_watchdog(client, client.queue, 60.0))
                 except Exception as exc:
                     _logger.warning("proactive speech failed: %s", exc)
 
@@ -1592,7 +1808,7 @@ def build_app():
         await asyncio.sleep(20)  # let startup finish loading before competing
         while True:
             try:
-                if not _governor().allow_background_work():
+                if not _governor().allow_background_work() or SPEECH_ACTIVE.is_set():
                     # low-memory: skip the cycle wholesale; the next one
                     # re-reads signals and fresh alerts still register late
                     await asyncio.sleep(interval_s)
@@ -1656,6 +1872,8 @@ def build_app():
                 cleanup_tasks.append(c.turn_task)
             if c.watchdog:
                 cleanup_tasks.append(c.watchdog)
+            if c.barge_task:
+                cleanup_tasks.append(c.barge_task)
             for task in cleanup_tasks:
                 task.cancel()
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
@@ -1716,10 +1934,11 @@ def build_app():
                     c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
                     await start_listening("follow-up")
                     return
-                await do_turn(c, q, text, trace, force_cloud=False)
-                if c.watchdog:
-                    c.watchdog.cancel()
-                c.watchdog = asyncio.create_task(_speak_watchdog(c, q, timeout=30.0))
+                audio_seconds = await do_turn(c, q, text, trace, force_cloud=False)
+                if c.playback_active:
+                    if c.watchdog:
+                        c.watchdog.cancel()
+                    c.watchdog = asyncio.create_task(_speak_watchdog(c, q, timeout=max(30.0, (audio_seconds or 0) + 15.0)))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1737,10 +1956,11 @@ def build_app():
             try:
                 c.thinking = True
                 c.emit(q, "state", state="thinking")
-                await do_turn(c, q, text, [], force_cloud=force_cloud)
-                if c.watchdog:
-                    c.watchdog.cancel()
-                c.watchdog = asyncio.create_task(_speak_watchdog(c, q, 30.0))
+                audio_seconds = await do_turn(c, q, text, [], force_cloud=force_cloud)
+                if c.playback_active:
+                    if c.watchdog:
+                        c.watchdog.cancel()
+                    c.watchdog = asyncio.create_task(_speak_watchdog(c, q, max(30.0, (audio_seconds or 0) + 15.0)))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1803,18 +2023,6 @@ def build_app():
             slice_ = audio[start_idx:end_idx]
             c.turn_task = asyncio.create_task(run_voice_turn(slice_))
 
-        async def _speak_watchdog(cc: Client, qq, timeout: float) -> None:
-            """If the orb dies mid-playback the TTS-end event never arrives;
-            time out to idle instead of leaving the orb stuck on SPEAKING."""
-            try:
-                await asyncio.sleep(timeout)
-            except asyncio.CancelledError:
-                return
-            if cc.state in ("thinking", "speaking"):
-                cc.thinking = False
-                cc.playback_active = False
-                cc.emit(qq, "state", state="idle")
-
         async def settle_confirmation(c, q, verdict: dict, user_text: str = "") -> bool:
             """Run one offline confirmation verdict: executor call + the same
             UI emits the typed path uses, so a voice settlement is
@@ -1863,6 +2071,39 @@ def build_app():
             c.remember("assistant", note, "writes" if kind == "write" else "edits")
             return not result.get("error")
 
+        async def confirm_barge_in(captured: np.ndarray, playback_id: str | None) -> None:
+            # Echo-cancelled speaker audio can still look like speech to an
+            # energy detector. During playback, require the wake phrase before
+            # cancelling; transcription runs off the event loop so output and
+            # mic capture keep flowing while it is checked.
+            try:
+                text, _ = await asyncio.to_thread(run_whisper, captured)
+                wake = re.search(r"\b(?:hey\s+)?jarvis\b", text, re.I)
+                if not wake or not c.playback_active or c.playback_id != playback_id:
+                    _logger.info("Barge-in ignored: no wake phrase or reply already ended")
+                    return
+                _logger.info("Barge-in confirmed by wake phrase")
+                c.barge_in = True
+                c.playback_active = False
+                c.playback_id = None
+                c.pending_learning = None
+                c.emit(q, "barge_in")
+                if c.watchdog:
+                    c.watchdog.cancel()
+                    c.watchdog = None
+                task = c.turn_task
+                if task and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                c.thinking = False
+                await start_listening("barge-in")
+                with c.lock:
+                    c.buffer = captured[-int(1.5 * SAMPLE_RATE):]
+            except Exception:
+                _logger.exception("Barge-in confirmation failed")
+            finally:
+                c.barge_checking = False
+
         async def handle_audio_chunk(chunk: bytes) -> None:
             if c.muted:
                 return
@@ -1881,7 +2122,7 @@ def build_app():
                 rms = float(np.sqrt(np.mean(pcm * pcm))) if pcm.size else 0.0
                 c.barge_audio.append(pcm.copy())
                 c.barge_audio_samples += len(pcm)
-                max_preroll = int(0.5 * SAMPLE_RATE)
+                max_preroll = int(1.5 * SAMPLE_RATE)
                 while c.barge_audio and c.barge_audio_samples > max_preroll:
                     excess = c.barge_audio_samples - max_preroll
                     first = c.barge_audio[0]
@@ -1897,26 +2138,15 @@ def build_app():
                 else:
                     c.barge_frames = 0
                     c.barge_candidate.clear()
-                if c.barge_frames >= int(SETTINGS.get("barge_min_frames", 4)):
+                if (c.barge_frames >= int(SETTINGS.get("barge_min_frames", 40))
+                        and not c.barge_checking):
                     captured = np.concatenate(c.barge_audio) if c.barge_audio else pcm
                     c.barge_candidate.clear()
                     c.barge_audio.clear()
                     c.barge_audio_samples = 0
                     c.barge_frames = 0
-                    c.barge_in = True
-                    c.playback_active = False
-                    c.emit(q, "barge_in")
-                    if c.watchdog:
-                        c.watchdog.cancel()
-                        c.watchdog = None
-                    task = c.turn_task
-                    if task and not task.done():
-                        task.cancel()
-                        await asyncio.gather(task, return_exceptions=True)
-                    c.thinking = False
-                    await start_listening("barge-in")
-                    with c.lock:
-                        c.buffer = captured[-int(0.5 * SAMPLE_RATE):]
+                    c.barge_checking = True
+                    c.barge_task = asyncio.create_task(confirm_barge_in(captured, c.playback_id))
                     return
                 return
             if not c.playback_active:
@@ -2027,8 +2257,8 @@ def build_app():
                     await settle_confirmation(c, q, {"kind": "note", "note": note},
                                               user_text=text)
                     continue
-                if c.turn_task and not c.turn_task.done():
-                    c.emit(q, "error", message="JARVIS is already handling a turn.")
+                if (c.turn_task and not c.turn_task.done()) or c.playback_active:
+                    c.emit(q, "error", message="JARVIS is still speaking or handling a turn. Please wait or interrupt by voice.")
                     continue
                 c.turn_task = asyncio.create_task(
                     run_text_turn(text, force_cloud=bool(msg.get("force_cloud"))))
@@ -2076,6 +2306,15 @@ def build_app():
                         else f"Reverted {result.get('path', 'the file')}.")
                 c.emit(q, "chat", role="system", text=note, engine="edits")
             elif op == "playback_done":
+                # Ignore an acknowledgement from a previous, interrupted
+                # reply; it must not end a newer reply's speaking state.
+                if c.playback_id is not None and msg.get("id") != c.playback_id:
+                    continue
+                c.playback_id = None
+                if c.pending_learning is not None:
+                    learning_text, c.pending_learning = c.pending_learning, None
+                    if _governor().allow_post_turn_learning():
+                        asyncio.create_task(_learn_about_user(agent_context(), learning_text))
                 c.playback_active = False
                 c.barge_frames = 0
                 c.barge_candidate.clear()
@@ -2096,15 +2335,15 @@ def build_app():
             elif op == "mute":
                 c.muted = bool(msg.get("on"))
                 c.listening = False
-                c.playback_active = False
                 with c.lock:
                     c.buffer = np.zeros(0, dtype=np.float32)
                     c.pcm_ring = np.zeros(0, dtype=np.int16)
                 c.emit(q, "state", state="muted" if c.muted else "idle")
             elif op == "settings":
-                for k in ("local_model", "voice", "wake_threshold", "vad_tail_s", "stt_beam_size",
+                for k in ("local_model", "voice", "voice_backend", "voice_pacing",
+                          "speak_max_chars", "wake_threshold", "vad_tail_s", "stt_beam_size",
                           "followup_window_s", "followup_max_streak",
-                          "barge_rms_threshold", "barge_min_frames",
+                          "barge_rms_threshold", "barge_min_frames", "tts_speed",
                           "tiers", "cloud", "vision"):
                     if k in msg:
                         SETTINGS[k] = msg[k]

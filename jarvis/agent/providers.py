@@ -51,6 +51,9 @@ class Tier:
     key: Optional[str] = None
     base_url: str = ""
     cooldown_until: float = 0.0
+    # Flash-Lite answers ANY thinkingConfig with a bare 400. Learned on the
+    # first rejection instead of re-paying a wasted round trip every call.
+    supports_thinking: bool = True
 
     @property
     def available(self) -> bool:
@@ -98,7 +101,8 @@ def _gemini_schema(node: dict) -> dict:
 
 
 def gemini_body(msgs: List[dict], tools: Optional[List[dict]], *,
-                max_tokens: int = 400, temperature: float = 0.3) -> dict:
+                max_tokens: int = 400, temperature: float = 0.3,
+                thinking: bool = True) -> dict:
     system_parts: List[str] = []
     contents: List[dict] = []
     for m in msgs:
@@ -132,14 +136,21 @@ def gemini_body(msgs: List[dict], tools: Optional[List[dict]], *,
                 args = json.loads(args) if isinstance(args, str) else dict(args)
             except Exception:
                 args = {}
-            parts.append({"functionCall": {"name": c.get("name", ""), "args": args}})
+            # Gemini 3.x requires the signature it issued with a functionCall
+            # to be echoed back in the following turn; dropping it 400s the
+            # tool-result request and pushes the turn onto the next tier.
+            call = {"functionCall": {"name": c.get("name", ""), "args": args}}
+            if c.get("thought_signature"):
+                call["functionCall"]["thoughtSignature"] = c["thought_signature"]
+            parts.append(call)
         if not parts:
             parts = [{"text": "(no content)"}]
         contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
     body: dict = {"contents": contents,
                   "generationConfig": {"temperature": temperature,
-                                       "maxOutputTokens": max_tokens,
-                                       "thinkingConfig": {"thinkingBudget": 0}}}
+                                       "maxOutputTokens": max_tokens}}
+    if thinking:
+        body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
     if system_parts:
         body["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
     if tools:
@@ -161,13 +172,72 @@ def parse_gemini_response(data: dict) -> dict:
     text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
     calls = [{"id": p["functionCall"].get("name", ""),
               "name": p["functionCall"].get("name", ""),
-              "arguments": json.dumps(p["functionCall"].get("args") or {})}
+              "arguments": json.dumps(p["functionCall"].get("args") or {}),
+              **({"thought_signature": p["thoughtSignature"]}
+                 if p.get("thoughtSignature") else {})}
              for p in parts if "functionCall" in p]
     usage = data.get("usageMetadata") or {}
     return {"content": text,
             "tool_calls": calls or None,
             "usage": {"prompt_tokens": usage.get("promptTokenCount", 0),
                       "completion_tokens": usage.get("candidatesTokenCount", 0)}}
+
+
+# --------------------------------------------------------------- hosted voice
+# Local Kokoro is genuinely offline, but on this laptop it costs ~0.2s of CPU
+# per character and runs ~1.17x SLOWER than the audio it produces, so a spoken
+# reply can neither start quickly nor stay continuous. Gemini's TTS endpoint
+# answers in ~4s of wall time and spends no local CPU at all, which is the
+# difference between "reads part, pauses, reads the rest" and one smooth
+# sentence. The local voice remains the fallback.
+GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+
+# Kokoro voice id -> Gemini preset, keeping the persona roughly by gender and
+# register rather than pretending the timbre is identical.
+GEMINI_TTS_VOICE = {
+    "af_heart": "Kore", "af_bella": "Zephyr", "af_nicole": "Aoede",
+    "af_sarah": "Fen", "af_sky": "Leda",
+    "am_adam": "Charon", "am_michael": "Orus",
+    "bf_emma": "Leda", "bf_isabella": "Aoede",
+    "bm_george": "Puck", "bm_lewis": "Encore",
+}
+
+
+def gemini_tts(text: str, *, key: str, voice_id: str = "af_heart",
+               post: Optional[Callable] = None, timeout_s: float = 60.0) -> bytes:
+    """Return WAV bytes for `text` from Gemini TTS (24 kHz mono PCM)."""
+    import base64
+    import io
+    import wave
+
+    if not (text or "").strip():
+        return b""
+    body = {
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
+                "voiceName": GEMINI_TTS_VOICE.get(voice_id, "Kore")}}},
+        },
+    }
+    url = f"{GEMINI_BASE}/models/{GEMINI_TTS_MODEL}:generateContent"
+    headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
+    status, data = (post or _httpx_post)(url, headers, body, timeout_s)
+    if status == 429:
+        raise RateLimited(_brief(data, "rate limited"))
+    if status >= 400:
+        raise ProviderError(f"gemini tts {status}: {_brief(data)}")
+    parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+    blob = next((p["inlineData"]["data"] for p in parts
+                 if "inlineData" in (p or {}) and p["inlineData"].get("data")), "")
+    if not blob:
+        raise ProviderError("gemini tts returned no audio")
+    pcm = base64.b64decode(blob)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as f:
+        f.setnchannels(1); f.setsampwidth(2); f.setframerate(24000)
+        f.writeframes(pcm)
+    return out.getvalue()
 
 
 def _openai_clean_msgs(msgs: List[dict]) -> List[dict]:
@@ -279,14 +349,15 @@ class ModelLadder:
         if t.kind == "gemini":
             url = f"{GEMINI_BASE}/models/{t.model}:generateContent"
             headers = {"x-goog-api-key": t.key or "", "Content-Type": "application/json"}
-            body = gemini_body(msgs, tools, max_tokens=max_tokens)
+            body = gemini_body(msgs, tools, max_tokens=max_tokens,
+                               thinking=t.supports_thinking)
             status, data = self._post(url, headers, body, timeout_s)
             if status == 429:
                 raise RateLimited(_brief(data, "rate limited"))
             if status == 400 and "thinkingConfig" in body.get("generationConfig", {}):
-                # Flash-Lite families answer ANY thinkingConfig with a
-                # generic 400 that does not name the field; retry without
-                # it once instead of relying on the error text matching.
+                # Flash-Lite families reject thinkingConfig outright. Remember
+                # that for this tier and retry once, cleanly.
+                t.supports_thinking = False
                 body["generationConfig"].pop("thinkingConfig", None)
                 status, data = self._post(url, headers, body, timeout_s)
             if status >= 400:

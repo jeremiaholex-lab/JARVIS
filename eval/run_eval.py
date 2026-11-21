@@ -166,7 +166,7 @@ def _drain_to_idle(conn, seconds: float) -> None:
         if op == "tts_done" and not acked:
             acked = True
             try:
-                conn.send(json.dumps({"op": "playback_done"}))
+                conn.send(json.dumps({"op": "playback_done", "id": m.get("id")}))
             except Exception:  # noqa: BLE001
                 return
         if op == "state" and m.get("state") in ("idle", "listening"):

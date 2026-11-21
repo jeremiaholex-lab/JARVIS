@@ -86,3 +86,23 @@ def test_unpunctuated_text_is_clamped_not_passed_through():
 def test_first_sentence_is_kept_even_when_later_ones_are_dropped():
     spoken = split_sentences("a" * 400 + ". b c d.", limit=150)
     assert spoken[0] == "a" * 150 + "…"
+
+
+def test_symbols_are_rewritten_into_speakable_words():
+    """Kokoro's G2P stalls on the terminal glyphs an assistant answer is full
+    of; measured 25.8s for one 113-char help line. Spelled out, the same text
+    synthesizes normally."""
+    from jarvis.speech import spoken_form
+
+    out = spoken_form("Slash commands: /3.5 for Gemini 3.5 Flash, /lite for Lite.")
+    assert "slash 3 point 5" in out
+    assert "/" not in out
+    assert "3.5" not in out
+    assert spoken_form("Use `code` and 1.2s -> done.") == "Use code and 1 point 2s then done."
+    assert spoken_form("Plain sentence, nothing odd.") == "Plain sentence, nothing odd."
+    assert spoken_form("Nov 20, 2026") == "Nov 20, 2026"
+
+
+def test_split_sentences_speaks_the_rewritten_form():
+    spoken = split_sentences("Switch to /lite now. Then /auto.")
+    assert " ".join(spoken) == "Switch to slash lite now. Then slash auto."

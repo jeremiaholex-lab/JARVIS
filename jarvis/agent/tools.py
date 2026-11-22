@@ -390,22 +390,42 @@ def _projects_write(action: str = "", name: str = "", path: str = "",
 
 
 def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
-    """Propose one desktop action; never performs OS input (Task 1)."""
+    """Propose one desktop action; never performs OS input (Task 1).
+
+    Two distinct payloads matter here:
+      * ``target`` is the exact user-requested action argument. It is the
+        executable payload bound by the approval snapshot and must NOT be
+        redacted — a path such as C:/Banking/statement.pdf is legitimate.
+      * ``evidence`` is the card/screen copy. Sensitive window/process
+        descriptions are redacted there, as required by the spec.
+    """
     from jarvis.desktop.actions import (
         DesktopAction,
         create_desktop_action_proposal,
         redact_sensitive,
     )
 
-    safe_target = copy.deepcopy(target)
-    # Descriptions/titles are redacted before they can reach a card.
-    for key in ("title", "name_or_path", "path", "text", "keys", "description"):
-        if isinstance(safe_target.get(key), str):
-            safe_target[key] = redact_sensitive(safe_target[key])
+    safe_target = copy.deepcopy(target)  # exact approved payload, never rewritten
     safe_evidence = {
         key: redact_sensitive(value) if isinstance(value, str) else copy.deepcopy(value)
         for key, value in evidence.items()
     }
+    # The card preview is evidence; it hides sensitive text but the target
+    # remains exact. Later tasks add the local screenshot crop to this dict.
+    safe_evidence["target_preview"] = redact_sensitive(
+        json.dumps(safe_target, ensure_ascii=False, sort_keys=True)
+    )
+
+    # Likely password/secret entry warns on the card but remains allowed after
+    # typed approval (global constraint). Flag the action, never edit its text.
+    typed_text = " ".join(
+        str(v) for k, v in safe_target.items()
+        if k in ("text", "keys", "name_or_path", "path") and isinstance(v, str)
+    ).casefold()
+    password_warning = any(
+        marker in typed_text for marker in ("password", "passwd", "pwd", "secret")
+    )
+
     action = DesktopAction(
         action_id="da_" + secrets.token_hex(8),
         kind=kind,
@@ -414,7 +434,18 @@ def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
         evidence=safe_evidence,
         expires_at=time.time() + _DESKTOP_PROPOSAL_TTL_SECONDS,
     )
-    return json.dumps(create_desktop_action_proposal(action), ensure_ascii=False)
+    if password_warning:
+        # Put the warning in evidence BEFORE the snapshot is taken, so the
+        # approved action the executor receives still carries it.
+        safe_evidence["password_warning"] = True
+    proposal = create_desktop_action_proposal(action)
+    if password_warning:
+        proposal["password_warning"] = True
+        proposal["note"] += (
+            " WARNING: this looks like a password/secret field; type 'yes, do it' "
+            "only if you intend JARVIS to enter it."
+        )
+    return json.dumps(proposal, ensure_ascii=False)
 
 
 def _desktop_open_app(name_or_path: str) -> str:

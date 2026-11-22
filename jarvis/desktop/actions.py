@@ -115,6 +115,22 @@ def _audit(event: str, action: DesktopAction, detail: str = "") -> None:
         pass
 
 
+def _action_from_snapshot(snapshot: dict) -> DesktopAction:
+    """Rebuild the authoritative action from the approved snapshot only.
+
+    The card, the equality check, and the executor must all see one immutable
+    payload. Never hand back the caller's live object after proposal time.
+    """
+    return DesktopAction(
+        action_id=snapshot["action_id"],
+        kind=snapshot["kind"],
+        target=copy.deepcopy(snapshot["target"]),
+        risk=snapshot["risk"],
+        evidence=copy.deepcopy(snapshot["evidence"]),
+        expires_at=snapshot["expires_at"],
+    )
+
+
 def _snapshot_of(action: DesktopAction) -> dict:
     """The exact approved payload: any extra/missing/changed field fails closed."""
     return {
@@ -136,18 +152,19 @@ def _phrase_ok(approval: str) -> bool:
 def create_desktop_action_proposal(action: DesktopAction) -> dict:
     """Register a pending proposal and return the card payload. Never executes."""
     snapshot = _snapshot_of(action)
+    authoritative = _action_from_snapshot(snapshot)
     with _LOCK:
-        _PENDING[action.action_id] = _PendingAction(action, snapshot)
-    _audit("proposed", action, f"phrase={CONFIRM_PHRASE}")
+        _PENDING[action.action_id] = _PendingAction(authoritative, snapshot)
+    _audit("proposed", authoritative, f"phrase={CONFIRM_PHRASE}")
     return {
         "status": "pending",
-        "action_id": action.action_id,
-        "action": action.action_id,
-        "kind": action.kind,
-        "target": copy.deepcopy(action.target),
-        "risk": action.risk,
-        "evidence": copy.deepcopy(action.evidence),
-        "expires_at": action.expires_at,
+        "action_id": authoritative.action_id,
+        "action": authoritative.action_id,
+        "kind": authoritative.kind,
+        "target": copy.deepcopy(authoritative.target),
+        "risk": authoritative.risk,
+        "evidence": copy.deepcopy(authoritative.evidence),
+        "expires_at": authoritative.expires_at,
         "snapshot": copy.deepcopy(snapshot),
         "requires_phrase": True,
         "note": (
@@ -184,7 +201,9 @@ def resolve_desktop_action(action_id: str, approval: str, snapshot: dict) -> Opt
             pending.state = "approved"
             # One-shot: no retry, no second execution, no late revalidation.
             _PENDING.pop(action_id, None)
-            approved = copy.deepcopy(pending.action)
+            # Reconstruct from the authoritative snapshot so the executor's
+            # payload is byte-for-byte what the approver saw on the card.
+            approved = _action_from_snapshot(pending.snapshot)
     if expired is not None:
         _audit("expired", expired, "approval window elapsed")
         return None

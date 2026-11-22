@@ -71,6 +71,22 @@ def test_redacts_sensitive_windows_from_facts_and_targets():
     assert redact_sensitive("Visual Studio Code") == "Visual Studio Code"
 
 
+def test_resolved_action_comes_from_the_authoritative_snapshot():
+    """A caller mutating the original action after the card is shown must not
+    change what the executor receives — approval binds the card, not the live
+    object."""
+    action = _action()
+    proposal = create_desktop_action_proposal(action)
+    action.target["x"] = 999
+    action.evidence["description"] = "mutated"
+
+    resolved = resolve_desktop_action("a1", "yes, do it", proposal["snapshot"])
+    assert resolved is not None
+    assert resolved.target == proposal["target"]
+    assert resolved.target["x"] == 10
+    assert resolved.evidence == proposal["evidence"]
+
+
 def test_exact_approval_returns_a_copy_once():
     action = _action()
     proposal = create_desktop_action_proposal(action)
@@ -174,3 +190,34 @@ def test_desktop_click_tool_returns_a_pending_proposal():
     assert result["status"] == "pending"
     assert result["target"]["x"] == 10
     assert result["requires_phrase"] is True
+
+
+def test_desktop_tool_preserves_exact_user_arguments_and_flags_password_fields():
+    """User-supplied paths/text are executable payload, not window titles.
+    Redaction applies to evidence/card copies; the approved target stays exact.
+    """
+    import json
+
+    tools = agent_tools.build_tools()
+    path_result = json.loads(agent_tools.execute(
+        tools, "desktop_open_file", {"path": "C:/Banking/statement.pdf"}
+    ))
+    assert path_result["target"]["path"] == "C:/Banking/statement.pdf"
+    assert "password_warning" not in path_result
+    assert path_result["evidence"]["target_preview"] == "[REDACTED]"
+
+    type_result = json.loads(agent_tools.execute(
+        tools, "desktop_type", {"text": "my password here", "x": 10, "y": 20}
+    ))
+    assert type_result["target"]["text"] == "my password here"
+    assert type_result["password_warning"] is True
+    assert type_result["evidence"]["target_preview"] == "[REDACTED]"
+    assert type_result["target"]["text"] not in json.dumps(type_result["evidence"])
+
+    # The warning must survive into the action the executor receives.
+    resolved = resolve_desktop_action(
+        type_result["action_id"], "yes, do it", type_result["snapshot"]
+    )
+    assert resolved is not None
+    assert resolved.target["text"] == "my password here"
+    assert resolved.evidence["password_warning"] is True

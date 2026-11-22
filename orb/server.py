@@ -949,6 +949,25 @@ def agent_context():
 # cannot read the file, the environment, or the native heartbeat HTTP headers.
 _CHANNEL_FILE = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenJarvis" / "orb-desktop-channel.json"
 _NATIVE_SESSION_ID = secrets.token_hex(16)
+
+
+def _port_available() -> bool:
+    """True only when this process can own the backend port.
+
+    An attaching instance must not publish a channel: doing so would overwrite
+    the live backend's file with secrets no shell can validate against it.
+    """
+    import socket as _socket
+
+    try:
+        with _socket.socket() as probe:
+            probe.bind(("127.0.0.1", PORT))
+        return True
+    except OSError:
+        return False
+
+
+_ATTACH_MODE = not _port_available()
 # Channel secrets live only in overlay_protocol, which also owns the heartbeat
 # latch. Duplicating them here allowed test/app state to diverge and let stale
 # tokens appear valid to one side of the boundary.
@@ -1015,11 +1034,19 @@ def _load_native_channel() -> tuple[str, str]:
     return "", ""
 
 
-_shell_from_env, _relay_from_env = _load_native_channel()
-if _shell_from_env and _relay_from_env:
-    arm_native_shell_channel(_shell_from_env, _relay_from_env)
+if _ATTACH_MODE:
+    # Preserve the running backend's channel file and secrets; this process
+    # will return from main() without serving any requests.
+    _shell_from_env, _relay_from_env = "", ""
+elif _port_available():
+    _shell_from_env, _relay_from_env = _load_native_channel()
+    if _shell_from_env and _relay_from_env:
+        arm_native_shell_channel(_shell_from_env, _relay_from_env)
+    else:
+        establish_native_channel()
 else:
-    establish_native_channel()
+    # Port changed hands during import: fail closed without touching the file.
+    _shell_from_env, _relay_from_env = "", ""
 
 
 def relay_secret() -> str:
@@ -2800,9 +2827,8 @@ def main() -> None:
     # idle) instead of dying silently. This is what the shell's "attach" mode
     # relies on.
     try:
-        s = _socket.socket()
-        s.bind(("127.0.0.1", PORT))
-        s.close()
+        with _socket.socket() as s:
+            s.bind(("127.0.0.1", PORT))
     except OSError:
         import urllib.request
 

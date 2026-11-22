@@ -6,7 +6,10 @@ session starts, no OS input is injected, and no screenshot is uploaded.
 from __future__ import annotations
 
 import base64
+import hmac
 import json
+import os
+import secrets
 import time
 
 import pytest
@@ -667,3 +670,80 @@ def test_attach_rejects_stale_channel_before_using_its_secrets(monkeypatch):
                     "x-jarvis-shell-hmac": server.sign_native_heartbeat(
                         "overlay_heartbeat", "stale-session", "a" * 64)})
         assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Fix round 4: no UI-thread heartbeat exceptions; attach mode must not clobber
+# the live backend's channel file.
+
+def test_native_heartbeat_contains_http_timeouts():
+    from pathlib import Path
+
+    app_context = (Path(server.__file__).parent / "OrbAppContext.cs").read_text(
+        encoding="utf-8")
+    sender = app_context[
+        app_context.index("public static void SendNativeHeartbeat()"):
+        app_context.index("// Backend supervision.")]
+    assert "catch (HttpRequestException)" in sender
+    assert "catch (OperationCanceledException)" in sender
+    assert "Covers TaskCanceledException" in sender
+
+
+def test_attach_mode_preserves_live_channel_file(monkeypatch, tmp_path):
+    import importlib
+    import socket
+    import sys
+    import types
+
+    from pathlib import Path
+
+    channel = tmp_path / "orb-desktop-channel.json"
+    channel.write_text(json.dumps({
+        "session_id": "live-backend",
+        "shell_token": "live-token",
+        "relay_secret": "live-relay",
+    }), encoding="utf-8")
+    before = channel.read_text(encoding="utf-8")
+
+    # Real server imports are heavy; isolate the channel bootstrap under test.
+    fake_overlay = types.ModuleType("jarvis.desktop.overlay_protocol")
+    fake_overlay.native_shell_token = lambda: ""
+    fake_overlay.native_relay_secret = lambda: ""
+    fake_overlay.arm_native_shell_channel = lambda *_: ""
+    monkeypatch.setitem(sys.modules,
+                        "jarvis.desktop.overlay_protocol", fake_overlay)
+    monkeypatch.delenv("JARVIS_SHELL_TOKEN", raising=False)
+    monkeypatch.delenv("JARVIS_RELAY_SECRET", raising=False)
+
+    class BusySocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def bind(self, _address):
+            raise OSError("port in use")
+
+    monkeypatch.setattr(socket, "socket", lambda *a, **kw: BusySocket())
+    source = (Path(server.__file__).parent / "server.py").read_text(encoding="utf-8")
+    start = source.index("_CHANNEL_FILE =")
+    end = source.index("def relay_secret()")
+    bootstrap = source[start:end]
+    namespace = {
+        "__name__": "server_channel_bootstrap",
+        "Path": Path,
+        "os": os,
+        "secrets": secrets,
+        "hmac": hmac,
+        "json": json,
+        "PORT": server.PORT,
+        "_overlay": fake_overlay,
+        "arm_native_shell_channel": fake_overlay.arm_native_shell_channel,
+    }
+    # Attach-mode backend import must leave the file untouched.
+    exec(compile(bootstrap, "server_channel_bootstrap", "exec"), namespace)
+    assert channel.read_text(encoding="utf-8") == before
+    assert namespace["_shell_from_env"] == ""
+    assert namespace["_relay_from_env"] == ""
+    assert namespace["_ATTACH_MODE"] is True

@@ -121,6 +121,12 @@ public sealed class OrbAppContext : ApplicationContext
             // A missed heartbeat is fail-closed on the backend; do not block
             // the UI thread with a retry loop or expose the token in logs.
         }
+        catch (OperationCanceledException)
+        {
+            // Covers TaskCanceledException (HttpClient timeout). It must never
+            // escape a WinForms timer or navigation handler as an unhandled
+            // thread exception.
+        }
     }
 
     // Backend supervision. When we launched the backend ourselves and it dies

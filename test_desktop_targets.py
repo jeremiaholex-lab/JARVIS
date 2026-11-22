@@ -144,10 +144,11 @@ def test_alternate_data_streams_on_drive_paths_are_rejected(target):
     assert reason
 
 
-def test_sensitive_target_is_rejected_before_proposal():
-    allowed, reason = validate_launch_target("C:/Banking/1Password vault.lnk")
-    assert allowed is False
-    assert "redact" in reason.lower() or "sensitive" in reason.lower()
+def test_local_paths_with_sensitive_names_are_allowed():
+    """Sensitive names are redacted in card evidence, not in local targets."""
+    for target in ("C:/Banking/statement.pdf", "C:/Banking/1Password vault.lnk"):
+        allowed, _reason = validate_launch_target(target)
+        assert allowed is True
 
 
 def test_target_reasons_are_english_only():

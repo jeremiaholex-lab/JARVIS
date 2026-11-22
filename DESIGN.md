@@ -32,10 +32,20 @@ Use near-black blue surfaces, a quiet blue accent, cool white type, subtle borde
 ## Interaction principles
 
 - Chat and confirmations must remain visible and usable; don't hide approvals in settings.
+- Desktop control is propose-only at the tool boundary: a card is shown before any OS input, and typed `yes, do it` plus exact snapshot equality is the only key that unlocks execution.
+- Confirm one desktop action per request; reject multi-step chains and mixed batches instead of executing them partially.
+- Stop controls are the visible HUD Stop and `Ctrl+Alt+J`; a new user turn also cancels pending work. Do not intercept Escape globally.
+- Hide sensitive windows (password managers, banking, private/incognito browsing) from facts, cards, target lists, and screenshot crops; a sensitive window vetoes a crop. Sensitive-sounding local document paths remain exact as approved payloads but are redacted in evidence previews.
+- Keep the safe launch policy strict: documents, folders, common applications, and shortcuts are allowed; executables outside common applications, scripts, URLs, network paths, and alternate streams are rejected before and again before execution.
+- Warn prominently on likely password/secret entry, but allow explicit approval after the warning.
 - Make microphone controls and their active states discoverable; do not imply microphone access when unavailable.
 - Display model preference separately from the actual model used for a turn. Slash commands change preference; the backend remains responsible for fallback.
 - Keep advanced settings and read-only diagnostics out of the primary workspace but one click away.
 - Preserve the voice-responsive orb, desktop HUD, and existing safety gates.
+
+## Desktop control flow
+
+The agent can propose seven non-READ desktop tools: open app/file, move cursor, click, scroll, type, and press keys. Calling one registers a `DesktopAction` and returns a confirmation payload; it performs no OS input. The card shows only evidence previews (a local crop and safe descriptions), never the executable target; sensitive window/paths are redacted in that preview while the approved target stays exact. Approval consumes the exact snapshot once; a different snapshot, a wrong phrase, a spent card, or a stale card fails closed. The native overlay heartbeat is a hard gate: no live shell means no card and no input. Execution revalidates the launch policy and stop state immediately before reaching the injected Win32 boundary. A new turn, HUD Stop, or `Ctrl+Alt+J` settles the pending action without executing it. Password-like text is flagged on the card but remains approvable by explicit typed confirmation.
 
 ## Voice output
 

@@ -296,7 +296,9 @@ def test_launch_policy_revalidated_at_execution_time():
 def test_launch_policy_rejected_reason_never_echoes_a_secret():
     fake = FakeDesktop()
     executor = DesktopActionExecutor(fake)
-    path = "C:\\Secrets\\password.txt"
+    # A sensitive-looking *name* is a legitimate local payload; a .ps1 script
+    # is not. The rejection reason must stay generic and echo nothing.
+    path = "C:\\Secrets\\password.ps1"
     action = DesktopAction(
         "l2", "open_file", {"path": path}, "write", {}, time.time() + 60
     )

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from jarvis.desktop.actions import redact_sensitive
+from jarvis.desktop.actions import redact_sensitive  # noqa: F401 - shared policy re-export
 
 # Scripts and executable formats are blocked in v1, whatever their casing,
 # bare or fully qualified. Common applications are reached through their
@@ -46,8 +46,13 @@ def validate_launch_target(path: str) -> tuple[bool, str]:
     if not target:
         return _reject("No target was provided.")
 
-    if redact_sensitive(target) != target:
-        return _reject("Sensitive targets are not available for desktop actions.")
+    # Sensitive *window* descriptions are redacted from facts and card copy,
+    # but a local document path is an executable payload: redaction belongs in
+    # evidence, not in the target or in this launch-safety policy. Rejecting a
+    # path because its name contains "Banking" would break a legitimate file
+    # open and diverge from the exact snapshot the operator approves.
+    if redact_sensitive(target) == "":
+        return _reject("No target was provided.")
 
     # A URI scheme is anything before the first ':'; a Windows drive letter
     # ('C:\...') is not a scheme and must not be rejected as one.

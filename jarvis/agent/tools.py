@@ -448,12 +448,33 @@ def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
     return json.dumps(proposal, ensure_ascii=False)
 
 
+def _propose_desktop_launch(kind: str, target: dict) -> str:
+    """Reject unsafe launch targets *before* a proposal or card exists.
+
+    Task 4 owns the policy; Task 5 revalidates it immediately before execution.
+    Checking it here closes the integration gap where a blocked target could
+    still produce a pending card that the operator would be asked to approve.
+    The reason is a fixed English string and never echoes the target.
+    """
+    from jarvis.desktop.targets import validate_launch_target
+
+    value = target.get("name_or_path") or target.get("path") or ""
+    allowed, why = validate_launch_target(str(value))
+    if not allowed:
+        return json.dumps({
+            "error": why,
+            "status": "rejected",
+            "note": "No confirmation card was created and nothing was opened.",
+        }, ensure_ascii=False)
+    return _propose_desktop_action(kind, target, {})
+
+
 def _desktop_open_app(name_or_path: str) -> str:
-    return _propose_desktop_action("open_app", {"name_or_path": name_or_path}, {})
+    return _propose_desktop_launch("open_app", {"name_or_path": name_or_path})
 
 
 def _desktop_open_file(path: str) -> str:
-    return _propose_desktop_action("open_file", {"path": path}, {})
+    return _propose_desktop_launch("open_file", {"path": path})
 
 
 def _desktop_move_cursor(x: int, y: int, monitor=None) -> str:

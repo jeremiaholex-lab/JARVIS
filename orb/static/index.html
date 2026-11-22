@@ -482,6 +482,10 @@
           <div class="row"><span>Memory free</span><b id="vMem">--</b></div>
           <div class="track"><i class="warm" id="bMem"></i></div>
         </div>
+        <div class="stat">
+          <div class="row"><span>Laptop</span><b id="vFacts">--</b></div>
+          <div class="hint" id="vFactsDetail">Reading local telemetry…</div>
+        </div>
         <div class="stat spark-wrap">
           <div class="row"><span>Voice signal</span><b id="vMic">0.00</b></div>
           <canvas id="spark" aria-hidden="true"></canvas>
@@ -1336,7 +1340,26 @@
     fetch("/api/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pref: this.value }) })
       .then(r => r.json()).then(() => loadBrain()).catch(() => {});
   };
-  if (!HUD_MODE) setTimeout(loadBrain, 1200);
+  function loadLaptopFacts() {
+    fetch("/api/agent").then(r => r.json()).then(d => {
+      const f = d.laptop_facts;
+      if (!f) { $("vFacts").textContent = "UNAVAILABLE"; return; }
+      const b = f.battery || {};
+      const net = f.network || {};
+      const apps = f.apps || [];
+      $("vFacts").textContent = b.available && b.percent != null
+        ? b.percent + "%" + (b.plugged_in ? " · plugged in" : "")
+        : "NO BATTERY DATA";
+      const ifaces = Array.isArray(net.interfaces) ? net.interfaces.length : 0;
+      $("vFactsDetail").textContent =
+        (net.available ? ifaces + " active interface(s)" : "network unavailable") +
+        " · " + (f.apps_available ? apps.length + " window(s)" : "windows unavailable");
+    }).catch(() => {
+      $("vFacts").textContent = "UNAVAILABLE";
+      $("vFactsDetail").textContent = "backend link offline";
+    });
+  }
+  if (!HUD_MODE) { setTimeout(loadBrain, 1200); setTimeout(loadLaptopFacts, 1200); setInterval(loadLaptopFacts, 30000); }
 
   /* =========================== CONTROLS =========================== */
   $("btnListen").addEventListener("click", function () {

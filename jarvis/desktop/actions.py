@@ -26,6 +26,7 @@ SENSITIVE_PATTERNS: tuple[str, ...] = (
     "lastpass",
     "vault",
     "banking",
+    "bank of ",
     "incognito",
     "private browsing",
     "private window",

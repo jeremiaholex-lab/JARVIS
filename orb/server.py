@@ -79,6 +79,9 @@ SAMPLE_RATE = 16000
 # Sentence-shaping lives in jarvis.speech so the morning briefing (which has no
 # web server in front of it) speaks with the same rules the orb does.
 from jarvis.speech import split_sentences as _split_sentences, speech_text as _speech_text
+# Read-only laptop facts are exposed to the orb for local readback. The
+# reference is imported by name so tests (and operators) can patch one seam.
+from jarvis.plugins import system_facts
 # The confirmation grammar is defined once, in file_edit, so the orb and the
 # Telegram host cannot drift. See EDIT_CONFIRM_RE there.
 from jarvis.security.file_edit import (
@@ -1308,6 +1311,11 @@ def build_app():
         read-tier tools it may call, and persistent memory stats."""
         try:
             ctx = agent_context()
+            try:
+                laptop_facts = system_facts.laptop_overview()
+            except Exception as exc:
+                laptop_facts = {"available": False,
+                                "reason": f"{exc.__class__.__name__}: {exc}"}
             return JSONResponse({
                 "tools": [t.name for t in ctx.tools],
                 "cloud_available": ctx.cloud_available,
@@ -1318,6 +1326,7 @@ def build_app():
                 "facts": [{"key": f.key, "value": f.value} for f in ctx.user_model.active_facts(6)],
                 "memory": ctx.memory.stats(),
                 "models": {"local": SETTINGS["local_model"], "cloud": SETTINGS["cloud"]["model"]},
+                "laptop_facts": laptop_facts,
             })
         except Exception as exc:
             return JSONResponse({"error": str(exc), "tools": [], "memory": {}}, status_code=200)

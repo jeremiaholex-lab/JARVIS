@@ -87,6 +87,22 @@ from jarvis.plugins import system_facts
 # execute mid-turn. The Task 1 store, its audit trail, and the latch settle
 # in one call.
 from jarvis.desktop.executor import cancel_pending_desktop_actions
+# Task 6: the overlay protocol is the only path from a card to OS input. It
+# re-exports heartbeat and event helpers here so the orb and tests share one
+# import seam. The C# shell is a separate process; ops are emitted over /ws.
+from jarvis.desktop import overlay_protocol as _overlay
+from jarvis.desktop.overlay_protocol import (
+    desktop_heartbeat_status,
+    desktop_overlay_connected,
+    emit_desktop_action_events,
+    execute_desktop_confirmation,
+    latest_desktop_card,
+    mark_desktop_overlay,
+    prepare_desktop_action,
+    reset_desktop_session,
+    resolve_desktop_confirmation,
+    stop_desktop_action,
+)
 # The confirmation grammar is defined once, in file_edit, so the orb and the
 # Telegram host cannot drift. See EDIT_CONFIRM_RE there.
 from jarvis.security.file_edit import (
@@ -955,6 +971,9 @@ class Client:
         # reload or reconnect does not erase what JARVIS was just told.
         self.memory = memory
         self.history: list[dict] = []
+        # Task 6: heartbeat timestamp from the C# shell and injected control.
+        self.overlay_seen_at = 0.0
+        self.desktop_control = None
         if memory is not None:
             try:
                 self.history = [
@@ -1602,6 +1621,35 @@ def build_app():
         text = " ".join(s.text.strip() for s in segs).strip()
         return text, time.time() - t0
 
+    async def emit_desktop_card(c: Client, q) -> None:
+        """Emit the pending desktop card through the same /ws pump as edits."""
+        card = latest_desktop_card()
+        if card is None:
+            return
+        for event in card["events"]:
+            # Only the confirmation card is user-visible; the rest of the
+            # sequence drives the shell overlay.
+            c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
+
+    async def settle_desktop_confirmation(c: Client, q, msg: dict) -> None:
+        """Typed phrase + exact snapshot + live overlay, or nothing executes."""
+        from jarvis.desktop.win32_control import DesktopControl
+
+        if c.desktop_control is None:
+            # Constructed lazily on the orb host only; tests inject fakes.
+            c.desktop_control = DesktopControl()
+        result = await asyncio.to_thread(
+            execute_desktop_confirmation, msg, c.desktop_control)
+        c.emit(q, "desktop_result", **result)
+        if result["status"] != "ok":
+            c.emit(q, "chat", role="system",
+                   text="Desktop action not done: " + str(
+                       result.get("error") or result.get("reason") or "blocked"),
+                   engine="desktop")
+        else:
+            c.emit(q, "chat", role="system",
+                   text="Desktop action completed.", engine="desktop")
+
     async def do_turn(c: Client, q, text: str, trace: list[dict], force_cloud: bool) -> None:
         """One agent turn: route -> read-tier tools -> answer -> speak."""
         from jarvis.agent.turn import run_turn
@@ -1720,6 +1768,10 @@ def build_app():
         # diff and requires the typed phrase. Nothing is on disk until then.
         for pe in ctx.pending_edits():
             c.emit(q, "edit_confirm", **pe)
+        # Desktop proposals are queued by the agent tools. One card per request;
+        # the exact snapshot travels with it and nothing executes until typed
+        # approval returns through /ws with a live overlay heartbeat.
+        await emit_desktop_card(c, q)
         # Learning is deferred until the browser finishes speaking. Running it
         # here competes for CPU and network while speech is being generated.
         c.pending_learning = text
@@ -2315,7 +2367,27 @@ def build_app():
             except Exception:
                 continue
             op = msg.get("op")
-            if op == "audio":
+            if op == "overlay_connected":
+                # The orb page announces itself when the WebView loads. The
+                # dedicated C# shell sends "shell_connected" + heartbeats and
+                # is the authority for fail-closed action gating.
+                c.overlay_seen_at = time.time()
+                mark_desktop_overlay("connected")
+                c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
+            elif op in ("shell_connected", "overlay_heartbeat"):
+                # The C# shell announces itself and then pings. A stale or
+                # missing heartbeat blocks every desktop action.
+                c.overlay_seen_at = time.time()
+                mark_desktop_overlay("connected" if op == "shell_connected"
+                                     else "heartbeat")
+                c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
+            elif op == "desktop_hud_action":
+                # HUD Stop / Ctrl+Alt+J: settle the pending card and cursor.
+                for event in stop_desktop_action(str(msg.get("reason") or "hud stop")):
+                    c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
+            elif op == "desktop_confirm":
+                await settle_desktop_confirmation(c, q, msg)
+            elif op == "audio":
                 await handle_audio_chunk(base64.b64decode(msg.get("data", "")))
             elif op == "start":
                 await start_listening("record-button")

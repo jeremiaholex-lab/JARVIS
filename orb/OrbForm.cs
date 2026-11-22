@@ -45,6 +45,15 @@ public sealed class OrbForm : Form
             $"window.jarvisHud&&window.jarvisHud.setMicEnabled({(_micEnabled ? "true" : "false")})");
     }
 
+    /// <summary>Relay a shell op to the page, which forwards it over /ws.</summary>
+    public void PostToPage(string json)
+    {
+        var core = _web.CoreWebView2;
+        if (core is null) return;
+        _ = core.ExecuteScriptAsync("window.jarvisHud&&window.jarvisHud.bridge&&"
+            + "window.jarvisHud.bridge(" + json + ")");
+    }
+
     private async void LoadWebView()
     {
         try
@@ -74,7 +83,17 @@ public sealed class OrbForm : Form
 
         // The page may load while the HUD is already visible; apply the
         // deferred mic state once it is safe to talk to the page.
-        wv.NavigationCompleted += (_, _) => ApplyMicState();
+        wv.NavigationCompleted += (_, _) =>
+        {
+            ApplyMicState();
+            PostToPage("{\"op\":\"shell_connected\"}");
+        };
+        wv.WebMessageReceived += (_, ev) =>
+        {
+            // The main window relays HUD Stop to the backend as well.
+            if (ev.WebMessageAsJson.Contains("stop-desktop", StringComparison.Ordinal))
+                PostToPage("{\"op\":\"desktop_hud_action\",\"reason\":\"hud stop\"}");
+        };
 
         try
         {

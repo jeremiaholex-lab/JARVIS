@@ -33,6 +33,7 @@ public sealed class OrbAppContext : ApplicationContext
 
     private OrbForm? _window;
     private OverlayForm? _overlay;
+    private CursorOverlayForm? _cursorOverlay;
     private bool _hudVisible;
     private bool _exiting;
 
@@ -64,6 +65,10 @@ public sealed class OrbAppContext : ApplicationContext
 
         _hotkey = new HotKeyWindow();
         _hotkey.Pressed += ToggleHud;
+        // Emergency stop: the same global chord cancels any pending desktop
+        // action as well as toggling the HUD. Escape is deliberately not
+        // intercepted globally (operator's explicit choice).
+        _hotkey.Pressed += () => OnDesktopStop("global hotkey");
         _hudItem.Text = _hotkey.IsRegistered
             ? $"Floating HUD\t{_hotkey.ShortcutText}"
             : "Floating HUD (use tray menu)";
@@ -185,6 +190,33 @@ public sealed class OrbAppContext : ApplicationContext
 
     private void ToggleHud() => SetHud(!_hudVisible);
 
+    /// <summary>Send a stop to the cursor layer and the backend (one-way).</summary>
+    private void OnDesktopStop(string reason)
+    {
+        _cursorOverlay?.ApplyDesktopCursorCommand(
+            "{\"op\":\"desktop_hud_action\",\"action\":\"stop\",\"reason\":\""
+            + reason + "\"}");
+        PostOverlayBridge("desktop_hud_action", "reason", reason);
+    }
+
+    private void PostOverlayBridge(string op, string? extraKey = null,
+                                   string? extraValue = null)
+    {
+        // The HUD page relays shell ops to /ws via window.jarvisHud.bridge.
+        string json = extraKey is null
+            ? "{\"op\":\"" + op + "\"}"
+            : "{\"op\":\"" + op + "\",\"" + extraKey + "\":\"" + extraValue + "\"}";
+        _overlay?.PostToPage(json);
+        // The main orb window relays too, so Stop works with either surface.
+        _window?.PostToPage(json);
+    }
+
+    /// <summary>Forward orb overlay ops to the transparent cursor window.</summary>
+    private void OnDesktopCursorCommand(string json)
+    {
+        (_cursorOverlay ??= new CursorOverlayForm()).ApplyDesktopCursorCommand(json);
+    }
+
     private void SetHud(bool on)
     {
         if (_exiting || _hudVisible == on) return;
@@ -236,6 +268,10 @@ public sealed class OrbAppContext : ApplicationContext
         if (_overlay is { IsDisposed: false } overlay)
         {
             try { overlay.Close(); } catch { }
+        }
+        if (_cursorOverlay is { IsDisposed: false } cursor)
+        {
+            try { cursor.Close(); } catch { }
         }
         if (_window is { IsDisposed: false, Visible: true } window)
         {

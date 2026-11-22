@@ -39,12 +39,19 @@ def _encode_png(width: int, height: int, rows: list[bytes]) -> bytes:
 
 
 def _decode_rgb(png: bytes) -> tuple[int, int, list[bytes]]:
-    """Decode the non-interlaced 8-bit RGB PNGs produced by the screen grab."""
+    """Decode the non-interlaced 8-bit PNGs produced by the screen grab.
+
+    The GDI backend emits 8-bit RGBA (color type 6); the decoder also accepts
+    grayscale (0), RGB (2), palette (3, 8-bit PLTE), and gray+alpha (4), and
+    normalizes every variant to 3-channel RGB rows. Interlaced captures are
+    rejected: no screen backend produces them.
+    """
     if len(png) < 24 or not png.startswith(_PNG_MAGIC):
         raise ScreenCaptureError("capture did not produce a PNG")
     pos = 8
     width = height = 0
     color_type = bit_depth = interlace = None
+    palette = b""
     compressed: list[bytes] = []
     while pos + 12 <= len(png):
         size = struct.unpack(">I", png[pos:pos + 4])[0]
@@ -56,17 +63,22 @@ def _decode_rgb(png: bytes) -> tuple[int, int, list[bytes]]:
                 raise ScreenCaptureError("invalid PNG header")
             width, height, bit_depth, color_type, _comp, _filter, interlace = \
                 struct.unpack(">IIBBBBB", data[:13])
+        elif tag == b"PLTE":
+            palette = data
         elif tag == b"IDAT":
             compressed.append(data)
         elif tag == b"IEND":
             break
     if not width or not height or not compressed:
         raise ScreenCaptureError("incomplete PNG capture")
-    if bit_depth != 8 or color_type != 2 or interlace != 0:
+    if bit_depth != 8 or interlace != 0:
+        raise ScreenCaptureError("unsupported PNG format for card crop")
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
+    if channels is None or (color_type == 3 and len(palette) < 3):
         raise ScreenCaptureError("unsupported PNG format for card crop")
     raw = zlib.decompress(b"".join(compressed))
-    stride = width * 3
-    rows: list[bytes] = []
+    stride = width * channels
+    pixels: list[bytes] = []
     previous = bytes(stride)
     offset = 0
     for _ in range(height):
@@ -76,9 +88,9 @@ def _decode_rgb(png: bytes) -> tuple[int, int, list[bytes]]:
         row = bytearray(raw[offset + 1:offset + 1 + stride])
         offset += 1 + stride
         for index in range(stride):
-            left = row[index - 3] if index >= 3 else 0
+            left = row[index - channels] if index >= channels else 0
             up = previous[index]
-            upper_left = previous[index - 3] if index >= 3 else 0
+            upper_left = previous[index - channels] if index >= channels else 0
             if filter_type == 1:
                 row[index] = (row[index] + left) & 0xFF
             elif filter_type == 2:
@@ -92,8 +104,26 @@ def _decode_rgb(png: bytes) -> tuple[int, int, list[bytes]]:
                 row[index] = (row[index] + predictor) & 0xFF
             elif filter_type != 0:
                 raise ScreenCaptureError("unsupported PNG row filter")
-        rows.append(bytes(row))
-        previous = rows[-1]
+        pixels.append(bytes(row))
+        previous = pixels[-1]
+
+    # Normalize every variant to 3-channel RGB; the crop is re-encoded as RGB.
+    rows: list[bytes] = []
+    for row in pixels:
+        converted = bytearray()
+        for start in range(0, len(row), channels):
+            pixel = row[start:start + channels]
+            if color_type == 0:
+                gray = pixel[0]
+                converted += bytes((gray, gray, gray))
+            elif color_type == 2:
+                converted += pixel
+            elif color_type == 3:
+                entry = pixel[0]
+                converted += palette[entry * 3:entry * 3 + 3]
+            else:  # gray+alpha or RGBA: keep the first three channels.
+                converted += pixel[:3]
+        rows.append(bytes(converted))
     return width, height, rows
 
 

@@ -10,9 +10,9 @@ import re
 
 from jarvis.desktop.actions import redact_sensitive
 
-# Scripts and executable formats are blocked in v1, whatever their casing.
-# A fully qualified path to a common application is the one explicit exception:
-# it names a known installed program rather than an arbitrary payload.
+# Scripts and executable formats are blocked in v1, whatever their casing,
+# bare or fully qualified. Common applications are reached through their
+# non-executable launchers (such as .lnk shortcuts), never through .exe.
 _BLOCKED_SUFFIXES: frozenset[str] = frozenset({
     ".exe", ".bat", ".cmd", ".ps1", ".psm1", ".psd1", ".vbs", ".vbe", ".js",
     ".jse", ".wsf", ".wsh", ".hta", ".msi", ".msp", ".msc", ".scr", ".com",
@@ -56,21 +56,17 @@ def validate_launch_target(path: str) -> tuple[bool, str]:
         return _reject("URLs and URI schemes are not supported in v1.")
     if _UNC.match(target):
         return _reject("Network paths are not supported in v1.")
+    # Drive-qualified paths are not URI schemes, but the drive letter is the
+    # only ':' allowed: an extra colon would be an alternate data stream.
     if re.match(r"^[a-zA-Z]:[\\/]", target):
+        if target.count(":") > 1:
+            return _reject("Alternate streams and device paths are not supported.")
         # Drive-qualified paths still need the script/extension check below.
-        pass
     # Relative paths may still try to smuggle a stream or device name.
     elif ":" in target:
         return _reject("Alternate streams and device paths are not supported.")
 
     lowered = target.casefold().rstrip(" .")
-    # A fully qualified path inside a known application directory is a common
-    # application. Arbitrary .exe locations and bare names stay blocked.
-    _COMMON_APP_DIRS = ("/program files/", "/program files (x86)/")
-    normalized = lowered.replace("\\", "/")
-    if (re.match(r"^[a-zA-Z]:[\\/]", target) and lowered.endswith(".exe")
-            and any(directory in normalized for directory in _COMMON_APP_DIRS)):
-        return True, "Allowed: common application."
     if _BLOCKED_TAIL_PATTERN.search(lowered):
         return _reject("Scripts, executables, and URLs are not supported in v1.")
     for suffix in _BLOCKED_SUFFIXES:

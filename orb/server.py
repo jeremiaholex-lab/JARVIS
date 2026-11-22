@@ -82,6 +82,11 @@ from jarvis.speech import split_sentences as _split_sentences, speech_text as _s
 # Read-only laptop facts are exposed to the orb for local readback. The
 # reference is imported by name so tests (and operators) can patch one seam.
 from jarvis.plugins import system_facts
+# A new user turn is a desktop stop source: cancel every pending action card
+# (and arm the executor stop latch) so the previous request's card cannot
+# execute mid-turn. The Task 1 store, its audit trail, and the latch settle
+# in one call.
+from jarvis.desktop.executor import cancel_pending_desktop_actions
 # The confirmation grammar is defined once, in file_edit, so the orb and the
 # Telegram host cannot drift. See EDIT_CONFIRM_RE there.
 from jarvis.security.file_edit import (
@@ -1600,6 +1605,15 @@ def build_app():
     async def do_turn(c: Client, q, text: str, trace: list[dict], force_cloud: bool) -> None:
         """One agent turn: route -> read-tier tools -> answer -> speak."""
         from jarvis.agent.turn import run_turn
+
+        # A new user turn is a desktop stop source: the previous request's
+        # pending action card must not execute — cancel it through the Task 1
+        # store (audit trail included) and arm the executor stop latch. The
+        # stop applies to the *previous* request, so clear the latch for this
+        # new one: a HUD stop must not freeze every future turn.
+        cancel_pending_desktop_actions("new turn")
+        from jarvis.desktop.executor import reset_cancel
+        reset_cancel()
 
         ctx = agent_context()
         t0 = time.time()

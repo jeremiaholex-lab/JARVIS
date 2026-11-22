@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 
 namespace JARVIS.Orb;
 
@@ -10,6 +11,7 @@ public static class ShellHost
 {
     public const int Port = 8010;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(3) };
+    internal static readonly HttpClient NativeHttp = Http;
     // ProcessRoot plus a user-scoped ACL: only the owning Windows user may
     // open it. WebView JS cannot read files, and the file lives outside the
     // checkout, so no page script can forge either out-of-band value. The file
@@ -21,7 +23,8 @@ public static class ShellHost
         "OpenJarvis", SecretFileName);
     private static readonly string ShellToken;
     private static readonly string RelaySecret;
-    private static readonly string NativeChannelError;
+    private static string nativeChannelError = "";
+    private static string NativeChannelError => nativeChannelError;
 
     public static string NativeShellToken => ShellToken;
     public static string NativeRelaySecret => RelaySecret;
@@ -30,22 +33,33 @@ public static class ShellHost
 
     static ShellHost()
     {
-        // Read first: an attached second shell must use the backend's secrets.
+        // A file alone is not authority: it can outlive the backend that wrote
+        // it. A well-shaped stale channel is used only after the live backend
+        // accepts a signed challenge through /api/native/session.
         if (File.Exists(SecretFilePath))
         {
             try
             {
-                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(SecretFilePath));
+                using var doc = JsonDocument.Parse(File.ReadAllText(SecretFilePath));
                 var root = doc.RootElement;
-                ShellToken = root.GetProperty("shell_token").GetString() ?? "";
-                RelaySecret = root.GetProperty("relay_secret").GetString() ?? "";
-                NativeChannelError = "";
-                if (ShellToken.Length == 64 && RelaySecret.Length == 64) return;
+                var fileToken = root.GetProperty("shell_token").GetString() ?? "";
+                var fileRelay = root.GetProperty("relay_secret").GetString() ?? "";
+                if (fileToken.Length == 64 && fileRelay.Length == 64
+                    && ValidateNativeChannel(fileToken))
+                {
+                    ShellToken = fileToken;
+                    RelaySecret = fileRelay;
+                    nativeChannelError = "";
+                    return;
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                nativeChannelError = ex.Message;
+            }
         }
-        // First launch or a damaged file: create a fresh channel. The file is
-        // written before the child is started so an attached shell can share it.
+        // First launch or a stale/damaged file: create a fresh channel. The file
+        // is written before the child starts so an attached shell can share it.
         ShellToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         RelaySecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         try
@@ -54,14 +68,49 @@ public static class ShellHost
             File.WriteAllText(SecretFilePath,
                 "{\"shell_token\":\"" + ShellToken + "\",\"relay_secret\":\"" + RelaySecret + "\"}",
                 System.Text.Encoding.UTF8);
-            NativeChannelError = "";
+            nativeChannelError = "";
         }
         catch (Exception ex)
         {
             // Fail closed: no environment secrets are passed, so the backend
             // arms neither heartbeat nor relay until a usable channel exists.
-            NativeChannelError = ex.Message;
+            nativeChannelError = ex.Message;
         }
+    }
+
+    internal static string SignNativeMessage(string op, string nonce, string token)
+    {
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(token));
+        return Convert.ToHexString(hmac.ComputeHash(
+            Encoding.UTF8.GetBytes(op + "|" + nonce))).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Prove the file's secret belongs to the backend now serving this port.
+    /// A stale file from an earlier backend cannot answer this challenge.
+    /// </summary>
+    private static bool ValidateNativeChannel(string token)
+    {
+        if (!PortOpen()) return false;
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var request = new HttpRequestMessage(HttpMethod.Post,
+            $"http://127.0.0.1:{Port}/api/native/session");
+        request.Headers.Add("x-jarvis-shell-token", token);
+        request.Headers.Add("x-jarvis-shell-hmac",
+            SignNativeMessage("native_session", nonce, token));
+        using var response = NativeHttp.Send(request);
+        if (!response.IsSuccessStatusCode) return false;
+        using var doc = JsonDocument.Parse(
+            response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+        var root = doc.RootElement;
+        return root.TryGetProperty("session_id", out var session)
+            && session.ValueKind == JsonValueKind.String
+            && session.GetString()!.Length > 0
+            && root.TryGetProperty("nonce_sig", out var sig)
+            && sig.ValueKind == JsonValueKind.String
+            && CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(sig.GetString() ?? ""),
+                Encoding.UTF8.GetBytes(SignNativeMessage("native_session", nonce, token)));
     }
 
     public static (Process? backend, bool attached) Launch(bool appendLog = false)

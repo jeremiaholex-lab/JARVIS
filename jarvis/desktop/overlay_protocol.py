@@ -6,6 +6,8 @@ OS input: everything here is pure data plus a small in-memory heartbeat latch.
 
 Safety invariants:
   * a card is produced only when the shell overlay is connected and fresh;
+  * native heartbeats are authenticated over loopback HTTP, never through the
+    WebView page bridge, so page JavaScript cannot arm the overlay gate;
   * the card displays ``evidence`` previews only — ``target`` is execution-only
     and travels inside the exact approval ``snapshot``;
   * a crop is local PNG bytes rendered as a data URI (never a URL or a path);
@@ -78,24 +80,52 @@ def mark_desktop_overlay(event: str, timestamp: float | None = None) -> None:
 
 
 def arm_native_shell_channel(token: str, relay_secret: str = "") -> str:
-    """Receive the native shell's per-session secrets from the local host."""
-    global _SHELL_TOKEN, _RELAY_SECRET, _OVERLAY_TIMESTAMP
+    """Receive the native shell's per-session secrets from the local host.
+
+    This does not arm the heartbeat latch. Only an authenticated native HTTP
+    heartbeat may do that; the page bridge never carries the token.
+    """
+    global _SHELL_TOKEN, _RELAY_SECRET
     if not isinstance(token, str) or not token:
         raise ValueError("native shell token required")
     with _LOCK:
         _SHELL_TOKEN = token
         if relay_secret:
             _RELAY_SECRET = str(relay_secret)
-        _OVERLAY_TIMESTAMP = _now()
     return _SHELL_TOKEN
 
 
-def is_shell_origin(msg: dict[str, Any]) -> bool:
-    """True only for shell heartbeats carrying the local native secret.
+def sign_native_heartbeat(op: str, nonce: str, token: str) -> str:
+    """MAC for a native shell heartbeat sent over the local HTTP channel."""
+    if not isinstance(token, str) or not token:
+        return ""
+    if op not in _SHELL_EVENTS and op not in ("native_session", "heartbeat"):
+        return ""
+    if not isinstance(nonce, str) or not nonce:
+        return ""
+    body = f"{op}|{nonce}".encode("utf-8")
+    return hmac.new(token.encode("utf-8"), body, "sha256").hexdigest()
 
-    The WebView page and native shell share a WebSocket. A page script can
-    emit arbitrary ops and a literal ``source: "shell"`` field, so an
-    out-of-band secret is required before an op may arm the overlay gate.
+
+def native_shell_token() -> str:
+    """Read-only access for the backend's authenticated native HTTP channel."""
+    with _LOCK:
+        return _SHELL_TOKEN
+
+
+def native_relay_secret() -> str:
+    """Read-only access for native relay signatures; never sent to a page."""
+    with _LOCK:
+        return _RELAY_SECRET
+
+
+def is_shell_origin(msg: dict[str, Any]) -> bool:
+    """Validate a native heartbeat after its transport has been authenticated.
+
+    The WebView page and native shell used to share a WebSocket. That path is
+    no longer trusted for heartbeats: the native shell authenticates directly
+    to the backend over loopback HTTP with a token the page cannot observe.
+    This helper remains the final in-process check before the latch is armed.
     """
     if not isinstance(msg, dict) or not _SHELL_TOKEN:
         return False
@@ -151,6 +181,7 @@ def reset_desktop_session(reason: str = "reset") -> None:
     The native secrets are deliberately retained: a shell restart rotates the
     token, but a lost heartbeat alone must not force a new out-of-band handshake.
     """
+    global _OVERLAY_TIMESTAMP
     clear_desktop_card(reason)
     with _LOCK:
         _OVERLAY_TIMESTAMP = 0.0
@@ -444,6 +475,9 @@ __all__ = [
     "desktop_heartbeat_status",
     "arm_native_shell_channel",
     "mark_native_shell_heartbeat",
+    "native_shell_token",
+    "native_relay_secret",
+    "sign_native_heartbeat",
     "is_shell_origin",
     "clear_desktop_card",
     "adopt_pending_desktop_proposal",

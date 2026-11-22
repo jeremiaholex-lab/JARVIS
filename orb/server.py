@@ -111,9 +111,11 @@ from jarvis.desktop.overlay_protocol import (
     match_desktop_confirmation,
     mark_desktop_overlay,
     mark_native_shell_heartbeat,
+    native_shell_token,
     prepare_desktop_action,
     reset_desktop_session,
     resolve_desktop_confirmation,
+    sign_native_heartbeat,
     stop_desktop_action,
 )
 # The confirmation grammar is defined once, in file_edit, so the orb and the
@@ -942,55 +944,82 @@ def agent_context():
 
 
 # The managed native shell passes per-session secrets in its child environment.
-# HTML/JS cannot read these; a standalone server persists the same user-scoped
-# channel file the C# shell reads, so attached windows share one backend's keys.
+# Each backend process owns the channel; a shell attaching to port 8010 must
+# validate it against that live backend before using the file's values. HTML/JS
+# cannot read the file, the environment, or the native heartbeat HTTP headers.
 _CHANNEL_FILE = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenJarvis" / "orb-desktop-channel.json"
+_NATIVE_SESSION_ID = secrets.token_hex(16)
+# Channel secrets live only in overlay_protocol, which also owns the heartbeat
+# latch. Duplicating them here allowed test/app state to diverge and let stale
+# tokens appear valid to one side of the boundary.
 
 
-def _persist_native_channel(shell_token: str, relay_secret: str) -> None:
+def _persist_native_channel(session_id: str, shell_token: str,
+                            relay_secret: str) -> None:
     """Write the local-only channel file; never log or echo its values."""
     try:
         _CHANNEL_FILE.parent.mkdir(parents=True, exist_ok=True)
         _CHANNEL_FILE.write_text(json.dumps({
+            "session_id": session_id,
             "shell_token": shell_token,
             "relay_secret": relay_secret,
         }), encoding="utf-8")
     except OSError:
         # The in-memory pair still works for this process. An attached shell
-        # will fail closed if it cannot read the channel, which is safe.
+        # will fail closed if it cannot validate the channel, which is safe.
         pass
+
+
+def verify_native_channel_session(session_id: str, shell_token: str,
+                                  relay_secret: str) -> bool:
+    """True only for this backend process's live channel identity."""
+    if not (session_id and shell_token and relay_secret):
+        return False
+    session_ok = hmac.compare_digest(str(session_id), _NATIVE_SESSION_ID)
+    token_ok = hmac.compare_digest(str(shell_token), _overlay.native_shell_token())
+    relay_ok = hmac.compare_digest(str(relay_secret), _overlay.native_relay_secret())
+    return session_ok and token_ok and relay_ok
+
+
+def shell_token() -> str:
+    """Secret shared only with the native shell, never sent to the page."""
+    return _overlay.native_shell_token()
+
+
+def establish_native_channel() -> tuple[str, str, str]:
+    """Bind a fresh channel to this backend session and publish it locally."""
+    shell_token = secrets.token_hex(32)
+    relay_secret = secrets.token_hex(32)
+    _persist_native_channel(_NATIVE_SESSION_ID, shell_token, relay_secret)
+    arm_native_shell_channel(shell_token, relay_secret)
+    return _NATIVE_SESSION_ID, relay_secret, shell_token
 
 
 def _load_native_channel() -> tuple[str, str]:
     env_shell = os.environ.get("JARVIS_SHELL_TOKEN") or ""
     env_relay = os.environ.get("JARVIS_RELAY_SECRET") or ""
     if env_shell and env_relay:
-        _persist_native_channel(env_shell, env_relay)
+        _persist_native_channel(_NATIVE_SESSION_ID, env_shell, env_relay)
         return env_shell, env_relay
     if bool(env_shell) != bool(env_relay):
         # Partial secrets are not a usable channel; fail closed.
         return "", ""
-    try:
-        saved = json.loads(_CHANNEL_FILE.read_text(encoding="utf-8"))
-        shell_token, relay_secret = str(saved["shell_token"]), str(saved["relay_secret"])
-        if len(shell_token) == 64 and len(relay_secret) == 64:
-            return shell_token, relay_secret
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    shell_token, relay_secret = secrets.token_hex(32), secrets.token_hex(32)
-    _persist_native_channel(shell_token, relay_secret)
-    return shell_token, relay_secret
+    # Never trust a well-shaped file from an older backend: it may still be on
+    # disk after the process that owned it died. This backend always publishes
+    # its own live session before any shell may attach.
+    return "", ""
 
 
 _shell_from_env, _relay_from_env = _load_native_channel()
-_RELAY_SECRET = _relay_from_env or secrets.token_urlsafe(32)
 if _shell_from_env and _relay_from_env:
-    arm_native_shell_channel(_shell_from_env, _RELAY_SECRET)
+    arm_native_shell_channel(_shell_from_env, _relay_from_env)
+else:
+    establish_native_channel()
 
 
 def relay_secret() -> str:
     """Secret shared only with the native shell, never sent to the page."""
-    return _RELAY_SECRET
+    return _overlay.native_relay_secret()
 
 
 def set_pending_desktop_proposal(proposal: dict) -> None:
@@ -1386,6 +1415,61 @@ def build_app():
             return JSONResponse({"models": OllamaEngine().list_models()})
         except Exception as exc:
             return JSONResponse({"models": [], "error": str(exc)})
+
+    @app.post("/api/native/session")
+    def native_session(request: Request):
+        """Validate a local channel against this live backend before attach.
+
+        The response contains only a short-lived nonce, never a secret. The
+        native shell signs the nonce to prove it owns the file's token.
+        """
+        if request.client is None or request.client.host not in {"127.0.0.1", "::1", "localhost"}:
+            return JSONResponse({"error": "loopback client required"}, status_code=403)
+        auth_token = request.headers.get("x-jarvis-shell-token", "")
+        auth_mac = request.headers.get("x-jarvis-shell-hmac", "")
+        if not (auth_token and auth_mac):
+            return JSONResponse({"error": "native channel authentication required"},
+                                status_code=401)
+        if not hmac.compare_digest(auth_token, _overlay.native_shell_token()):
+            return JSONResponse({"error": "native channel authentication required"},
+                                status_code=401)
+        nonce = secrets.token_hex(16)
+        expected = sign_native_heartbeat("native_session", nonce, auth_token)
+        if not hmac.compare_digest(auth_mac, expected):
+            return JSONResponse({"error": "native channel authentication required"},
+                                status_code=401)
+        return JSONResponse({
+            "session_id": _NATIVE_SESSION_ID,
+            "nonce": nonce,
+            "nonce_sig": sign_native_heartbeat("native_session", nonce, auth_token),
+        })
+
+    @app.post("/api/native/heartbeat")
+    async def native_heartbeat(request: Request):
+        """Authenticated native heartbeat; never routed through the page."""
+        if request.client is None or request.client.host not in {"127.0.0.1", "::1", "localhost"}:
+            return JSONResponse({"error": "loopback client required"}, status_code=403)
+        shell_token = _overlay.native_shell_token()
+        supplied_token = request.headers.get("x-jarvis-shell-token", "")
+        supplied_mac = request.headers.get("x-jarvis-shell-hmac", "")
+        if not (shell_token and supplied_token and supplied_mac):
+            return JSONResponse({"error": "native heartbeat authentication required"},
+                                status_code=401)
+        if not hmac.compare_digest(supplied_token, shell_token):
+            return JSONResponse({"error": "native heartbeat authentication required"},
+                                status_code=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "json body required"}, status_code=400)
+        op = str(body.get("op") or "")
+        nonce = str(body.get("nonce") or "")
+        expected = sign_native_heartbeat(op, nonce, supplied_token)
+        if not expected or not hmac.compare_digest(supplied_mac, expected):
+            return JSONResponse({"error": "native heartbeat authentication required"},
+                                status_code=401)
+        mark_native_shell_heartbeat(op, supplied_token)
+        return JSONResponse(desktop_heartbeat_status())
 
     @app.get("/api/status")
     def status():
@@ -2518,9 +2602,8 @@ def build_app():
                 c.overlay_seen_at = time.time()
                 c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
             elif op in ("shell_connected", "overlay_heartbeat"):
-                # Only the native shell's out-of-band token arms the gate.
-                if mark_native_shell_heartbeat(op, str(msg.get("token") or "")):
-                    c.overlay_seen_at = time.time()
+                # Retired: the page can forge these ops and must not arm the
+                # gate. Native shell heartbeats use /api/native/heartbeat.
                 c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
             elif op == "desktop_hud_action":
                 # HUD Stop / Ctrl+Alt+J: settle the pending card and cursor.

@@ -1,3 +1,4 @@
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -85,15 +86,41 @@ public sealed class OrbAppContext : ApplicationContext
             && _relaySecret.Length == 64 && _shellToken.Length == 64;
     }
 
-    /// <summary>Native shell heartbeat proof; never read from the page bridge.</summary>
-    public static string ShellHeartbeatJson(string op)
+    /// <summary>
+    /// Send a heartbeat over the native-only loopback channel. The token is
+    /// used as an HTTP header and HMAC key; it is never serialized into a page
+    /// bridge message or injected by ExecuteScriptAsync.
+    /// </summary>
+    public static void SendNativeHeartbeat()
     {
-        if (op is not ("shell_connected" or "overlay_heartbeat")) return "{}";
-        return System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, string>
+        if (!_secretsReady) return;
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        const string op = "heartbeat";
+        var request = new HttpRequestMessage(HttpMethod.Post,
+            $"http://127.0.0.1:{ShellHost.Port}/api/native/heartbeat")
         {
-            ["op"] = op,
-            ["token"] = _shellToken,
-        });
+            Content = new StringContent(
+                JsonSerializer.Serialize(new Dictionary<string, string>
+                {
+                    ["op"] = op,
+                    ["nonce"] = nonce,
+                }),
+                Encoding.UTF8,
+                "application/json"),
+        };
+        request.Headers.Add("x-jarvis-shell-token", _shellToken);
+        request.Headers.Add("x-jarvis-shell-hmac",
+            ShellHost.SignNativeMessage(op, nonce, _shellToken));
+        try
+        {
+            using var response = ShellHost.NativeHttp.Send(request);
+            response.EnsureSuccessStatusCode();
+        }
+        catch (HttpRequestException)
+        {
+            // A missed heartbeat is fail-closed on the backend; do not block
+            // the UI thread with a retry loop or expose the token in logs.
+        }
     }
 
     // Backend supervision. When we launched the backend ourselves and it dies

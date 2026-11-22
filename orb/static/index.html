@@ -1166,7 +1166,8 @@
 
   /* ======================= DESKTOP OVERLAY CARD ======================= */
   // The C# shell listens on a postMessage bridge so the WebView page cannot
-  // spoof backend events; only ops the backend actually emitted are forwarded.
+  // spoof backend events; only signed ops the backend emitted are forwarded.
+  // Native heartbeats are authenticated by the native shell over loopback HTTP.
   function forwardOverlayOp(m) {
     if (!OVERLAY_OPS.has(m.op)) return;
     if (typeof m.relay_sig !== "string") return;

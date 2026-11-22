@@ -88,7 +88,7 @@ public sealed class OrbForm : Form
         wv.NavigationCompleted += (_, _) =>
         {
             ApplyMicState();
-            PostToPage(OrbAppContext.ShellHeartbeatJson("shell_connected"));
+            OrbAppContext.SendNativeHeartbeat();
         };
         wv.WebMessageReceived += (_, ev) =>
         {

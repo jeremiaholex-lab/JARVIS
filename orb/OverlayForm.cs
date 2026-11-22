@@ -63,7 +63,7 @@ public sealed class OverlayForm : Form
         // A 2 s heartbeat proves this shell is alive. The backend blocks every
         // desktop action when it stops receiving these (fail closed).
         _heartbeat = new System.Windows.Forms.Timer { Interval = 2000 };
-        _heartbeat.Tick += (_, _) => PostBridge("overlay_heartbeat");
+        _heartbeat.Tick += (_, _) => OrbAppContext.SendNativeHeartbeat();
 
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
     }
@@ -173,7 +173,7 @@ public sealed class OverlayForm : Form
         {
             _ready = true;
             ApplyMic();
-            PostBridge("shell_connected");
+            OrbAppContext.SendNativeHeartbeat();
             _heartbeat.Start();
         };
 
@@ -202,13 +202,6 @@ public sealed class OverlayForm : Form
     private void PostBridge(string op, string? extraKey = null, string? extraValue = null)
     {
         if (!_ready) return;
-        // Heartbeats carry a native-only token. A page script can emit the op
-        // itself, but cannot put this value in a WebSocket heartbeat.
-        if (op is "shell_connected" or "overlay_heartbeat")
-        {
-            PostToPage(OrbAppContext.ShellHeartbeatJson(op));
-            return;
-        }
         var fields = new Dictionary<string, string?> { ["op"] = op };
         if (extraKey is not null) fields[extraKey] = extraValue;
         PostToPage(JsonSerializer.Serialize(fields));

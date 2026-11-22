@@ -317,6 +317,7 @@ def test_card_lifecycle_waits_for_approval():
 def test_page_announcement_cannot_arm_shell_overlay_gate():
     """Important 5: only C# shell_connected/heartbeats arm the fail-closed gate."""
     server.reset_desktop_session("page cannot arm gate")
+    server.mark_desktop_overlay("shell_connected")
     server.mark_desktop_overlay("page_connected")
     assert server.desktop_overlay_connected()  # prior native heartbeat still fresh
     server.mark_desktop_overlay("shell_connected", timestamp=time.time() - 10)
@@ -367,7 +368,7 @@ def test_typed_approval_in_chat_is_routed_to_desktop_confirmation():
 
 
 def test_shell_origin_marker_is_required_for_heartbeats():
-    """Important 5: an injected shell op carries a shared native secret."""
+    """Important 5: the old in-page token path is no longer an authority."""
     token = server.arm_native_shell_channel("shell-origin-test")
     assert server.is_shell_origin({"op": "shell_connected", "token": token})
     assert server.is_shell_origin({"op": "overlay_heartbeat", "token": token})
@@ -510,8 +511,24 @@ def test_native_rejects_page_authored_ops_without_relay_signature():
                       app_context, re.S)
     assert match and "_cursorOverlay?.ApplyDesktopCursorCommand" not in match.group(1)
     assert "PostOverlayBridge(\"desktop_hud_action\"" in match.group(1)
-    # Shell heartbeat proof comes from the native token, not a page field.
-    assert "ShellHeartbeatJson" in app_context
+
+
+def test_native_heartbeat_never_enters_page_bridge():
+    from pathlib import Path
+
+    base = Path(server.__file__).parent
+    app_context = (base / "OrbAppContext.cs").read_text(encoding="utf-8")
+    orb = (base / "OrbForm.cs").read_text(encoding="utf-8")
+    overlay = (base / "OverlayForm.cs").read_text(encoding="utf-8")
+    page = (base / "static" / "index.html").read_text(encoding="utf-8")
+    assert "ShellHeartbeatJson" not in app_context
+    for source in (orb, overlay):
+        assert "shell_connected" not in source
+        assert "overlay_heartbeat" not in source
+        assert "SendNativeHeartbeat" in source
+    assert "heartbeats are authenticated by the native shell" in page
+    assert "shell_connected" not in page
+    assert "overlay_heartbeat" not in page
 
 
 def test_attached_shell_channel_is_shared_out_of_band():
@@ -528,3 +545,101 @@ def test_attached_shell_channel_is_shared_out_of_band():
     # Both sides use the same path and file shape.
     assert "orb-desktop-channel.json" in Path(server.__file__).read_text(
         encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3: native heartbeat channel and live-session channel binding.
+
+def test_page_bridge_cannot_arm_native_heartbeat_gate():
+    from fastapi.testclient import TestClient
+
+    # Simulate a page script that has taken over window.jarvisHud.bridge and
+    # sends every op/token combination it can see through the WebSocket.
+    server.reset_desktop_session("page bridge spoof")
+    app = server.build_app()
+    with TestClient(app, client=("127.0.0.1", 12345)) as client:
+        with client.websocket_connect("/ws") as ws:
+            for op in ("shell_connected", "overlay_heartbeat"):
+                ws.send_json({"op": op, "source": "shell"})
+                ws.send_json({"op": op, "token": "test-shell-token"})
+    # The retired ops are ignored. No page-visible op may arm the latch, and a
+    # WebSocket receive here would block because they emit no response.
+    assert not server.desktop_overlay_connected()
+
+
+def test_authenticated_native_channel_arms_heartbeat_without_page_ops():
+    from fastapi.testclient import TestClient
+
+    server.reset_desktop_session("native channel heartbeat")
+    app = server.build_app()
+    server.arm_native_shell_channel("test-shell-token", "test-relay-secret")
+    with TestClient(app, client=("127.0.0.1", 12345)) as client:
+        response = client.post("/api/native/heartbeat", json={
+            "op": "overlay_heartbeat",
+            "nonce": "native-nonce-1",
+        }, headers={"x-jarvis-shell-token": "test-shell-token",
+                    "x-jarvis-shell-hmac": server.sign_native_heartbeat(
+                        "overlay_heartbeat", "native-nonce-1", "test-shell-token")})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "ok"
+    assert server.desktop_overlay_connected()
+
+    assert not server.desktop_overlay_connected(time.time() + 10)
+    server.reset_desktop_session("native channel wrong mac")
+    assert not server.desktop_overlay_connected()
+    with TestClient(app, client=("127.0.0.1", 12346)) as client:
+        response = client.post("/api/native/heartbeat", json={
+            "op": "overlay_heartbeat",
+            "nonce": "native-nonce-2",
+        }, headers={"x-jarvis-shell-token": "test-shell-token",
+                    "x-jarvis-shell-hmac": "0" * 64})
+        assert response.status_code == 401
+    assert not server.desktop_overlay_connected()
+
+
+def test_stale_native_channel_file_is_not_accepted_when_backend_restarts(
+        monkeypatch, tmp_path):
+    from pathlib import Path
+
+    stale_channel = tmp_path / "orb-desktop-channel.json"
+    stale_channel.write_text(json.dumps({
+        "session_id": "old-backend-session",
+        "shell_token": "a" * 64,
+        "relay_secret": "b" * 64,
+    }), encoding="utf-8")
+    monkeypatch.setattr(server, "_CHANNEL_FILE", stale_channel)
+    monkeypatch.delenv("JARVIS_SHELL_TOKEN", raising=False)
+    monkeypatch.delenv("JARVIS_RELAY_SECRET", raising=False)
+    live_session, relay_secret, shell_token = server.establish_native_channel()
+    assert live_session != "old-backend-session"
+    assert shell_token != "a" * 64
+    assert relay_secret != "b" * 64
+    saved = json.loads(stale_channel.read_text(encoding="utf-8"))
+    assert saved["session_id"] == live_session
+    assert saved["shell_token"] == shell_token
+    assert saved["relay_secret"] == relay_secret
+    assert server.verify_native_channel_session(
+        live_session, server.shell_token(), server.relay_secret())
+    assert not server.verify_native_channel_session("old-backend-session",
+                                                    "a" * 64, "b" * 64)
+
+
+def test_attach_rejects_stale_channel_before_using_its_secrets(monkeypatch):
+    from pathlib import Path
+
+    shell_host = (Path(server.__file__).parent / "ShellHost.cs").read_text(
+        encoding="utf-8")
+    assert "ValidateNativeChannel" in shell_host
+    assert "native/session" in shell_host
+    assert "NativeChannelError" in shell_host
+
+    app = server.build_app()
+    from fastapi.testclient import TestClient
+
+    with TestClient(app, client=("127.0.0.1", 12347)) as client:
+        response = client.post("/api/native/heartbeat", json={
+            "op": "overlay_heartbeat", "nonce": "stale-session",
+        }, headers={"x-jarvis-shell-token": "a" * 64,
+                    "x-jarvis-shell-hmac": server.sign_native_heartbeat(
+                        "overlay_heartbeat", "stale-session", "a" * 64)})
+        assert response.status_code == 401

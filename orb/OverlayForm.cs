@@ -202,12 +202,16 @@ public sealed class OverlayForm : Form
     private void PostBridge(string op, string? extraKey = null, string? extraValue = null)
     {
         if (!_ready) return;
-        PostToPage(JsonSerializer.Serialize(new Dictionary<string, string?>
+        // Heartbeats carry a native-only token. A page script can emit the op
+        // itself, but cannot put this value in a WebSocket heartbeat.
+        if (op is "shell_connected" or "overlay_heartbeat")
         {
-            ["op"] = op,
-            ["source"] = "shell",  // page scripts cannot arm the overlay gate
-            [extraKey ?? ""] = extraValue,
-        }));
+            PostToPage(OrbAppContext.ShellHeartbeatJson(op));
+            return;
+        }
+        var fields = new Dictionary<string, string?> { ["op"] = op };
+        if (extraKey is not null) fields[extraKey] = extraValue;
+        PostToPage(JsonSerializer.Serialize(fields));
     }
 
     /// <summary>Send a JSON op to the page (used by OrbAppContext for stops).</summary>
@@ -233,10 +237,9 @@ public sealed class OverlayForm : Form
             string op = opEl.GetString() ?? "";
 
             // The page forwards backend overlay ops back to the native shell.
-            // Only the documented cursor ops may reach the cursor window;
-            // heartbeat/stop claims from a page must not drive the overlay.
-            if (op.StartsWith("desktop_cursor_", StringComparison.Ordinal)
-                || op == "desktop_confirm" || op == "desktop_result")
+            // HMAC verification happens in OrbAppContext; an unsigned op from
+            // page script cannot drive the cursor window.
+            if (OrbAppContext.IsTrustedRelay(e.WebMessageAsJson))
                 CursorCommandReceived?.Invoke(this, e.WebMessageAsJson);
 
             switch (op)

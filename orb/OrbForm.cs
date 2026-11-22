@@ -88,18 +88,16 @@ public sealed class OrbForm : Form
         wv.NavigationCompleted += (_, _) =>
         {
             ApplyMicState();
-            PostToPage("{\"op\":\"shell_connected\",\"source\":\"shell\"}");
+            PostToPage(OrbAppContext.ShellHeartbeatJson("shell_connected"));
         };
         wv.WebMessageReceived += (_, ev) =>
         {
             // The main window relays HUD Stop to the backend as well.
             if (ev.WebMessageAsJson.Contains("stop-desktop", StringComparison.Ordinal))
                 PostToPage("{\"op\":\"desktop_hud_action\",\"reason\":\"hud stop\"}");
-            // Backend overlay ops are echoed by forwardOverlayOp(); route only
-            // those to the native cursor layer, never page-authored commands.
-            if (ev.WebMessageAsJson.Contains("desktop_cursor_", StringComparison.Ordinal)
-                || ev.WebMessageAsJson.Contains("desktop_confirm", StringComparison.Ordinal)
-                || ev.WebMessageAsJson.Contains("desktop_result", StringComparison.Ordinal))
+            // Backend overlay ops are echoed by forwardOverlayOp(). The app
+            // context verifies the backend HMAC before any cursor op is used.
+            if (OrbAppContext.IsTrustedRelay(ev.WebMessageAsJson))
                 CursorCommandReceived?.Invoke(this, ev.WebMessageAsJson);
         };
 

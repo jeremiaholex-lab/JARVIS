@@ -6,6 +6,7 @@ session starts, no OS input is injected, and no screenshot is uploaded.
 from __future__ import annotations
 
 import base64
+import json
 import time
 
 import pytest
@@ -31,7 +32,8 @@ def _clean_state():
     configure_desktop_audit(None)
     executor_module.reset_cancel()
     server.reset_desktop_session("overlay test setup")
-    server.mark_desktop_overlay("shell_connected")
+    server.arm_native_shell_channel("test-shell-token", "test-relay-secret")
+    server.mark_desktop_overlay("shell_connected", timestamp=time.time())
     yield
     server.reset_desktop_session("overlay test teardown")
     cancel_pending_desktop_actions("overlay test teardown")
@@ -316,8 +318,10 @@ def test_page_announcement_cannot_arm_shell_overlay_gate():
     """Important 5: only C# shell_connected/heartbeats arm the fail-closed gate."""
     server.reset_desktop_session("page cannot arm gate")
     server.mark_desktop_overlay("page_connected")
+    assert server.desktop_overlay_connected()  # prior native heartbeat still fresh
+    server.mark_desktop_overlay("shell_connected", timestamp=time.time() - 10)
     assert not server.desktop_overlay_connected()
-    server.mark_desktop_overlay("shell_connected")
+    server.mark_native_shell_heartbeat("shell_connected", "test-shell-token")
     assert server.desktop_overlay_connected()
 
 
@@ -335,7 +339,7 @@ def test_production_proposal_reaches_card_without_new_proposal():
     """Critical 1: the orb bridges the Task 1 store into the card/WS pump."""
     action = _action("prod1")
     proposal = create_desktop_action_proposal(action)
-    card = server.adopt_pending_desktop_proposal(proposal)
+    card = server.adopt_pending_desktop_proposal(proposal, owner_id="owner-a")
     assert card["status"] == "pending"
     assert card["action_id"] == "prod1"
     assert card["snapshot"] == proposal["snapshot"]
@@ -347,7 +351,7 @@ def test_adopted_card_survives_websocket_json_roundtrip():
     import json
 
     proposal = create_desktop_action_proposal(_action("prod2"))
-    card = server.adopt_pending_desktop_proposal(proposal)
+    card = server.adopt_pending_desktop_proposal(proposal, owner_id="owner-a")
     decoded = json.loads(json.dumps(card))
     assert decoded["events"][0]["op"] == "desktop_confirm"
     assert decoded["events"][0]["snapshot"] == proposal["snapshot"]
@@ -363,8 +367,164 @@ def test_typed_approval_in_chat_is_routed_to_desktop_confirmation():
 
 
 def test_shell_origin_marker_is_required_for_heartbeats():
-    """Important 5: an injected shell op carries proof the page cannot forge."""
-    assert server.is_shell_origin({"op": "shell_connected", "source": "shell"})
-    assert server.is_shell_origin({"op": "overlay_heartbeat", "source": "SHELL"})
+    """Important 5: an injected shell op carries a shared native secret."""
+    token = server.arm_native_shell_channel("shell-origin-test")
+    assert server.is_shell_origin({"op": "shell_connected", "token": token})
+    assert server.is_shell_origin({"op": "overlay_heartbeat", "token": token})
     assert not server.is_shell_origin({"op": "shell_connected"})
-    assert not server.is_shell_origin({"op": "overlay_connected", "source": "shell"})
+    assert not server.is_shell_origin({"op": "overlay_connected", "token": token})
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: unforgeable shell signals, reachable proposals, card ownership.
+
+def test_page_source_field_cannot_arm_shell_gate():
+    server.reset_desktop_session("spoofed page heartbeat")
+    assert not server.is_shell_origin({"op": "overlay_heartbeat", "source": "shell"})
+    server.mark_desktop_overlay("shell_connected", timestamp=time.time() - 10)
+    assert not server.desktop_overlay_connected()
+    token = server.arm_native_shell_channel("native-test-token")
+    assert server.is_shell_origin({"op": "overlay_heartbeat", "token": token})
+    server.mark_native_shell_heartbeat("overlay_heartbeat", "native-test-token")
+    assert server.desktop_overlay_connected()
+
+
+def test_proposal_hook_is_consumed_by_real_orb_turn():
+    action = _action("hooked")
+    proposal = create_desktop_action_proposal(action)
+    q = _ProposalQueue()
+    c = server.Client()
+    c.desktop_control = FakeDesktop()
+    # Task 7's tool returns the proposal as JSON text, not a dict.
+    server.set_pending_desktop_proposal(json.dumps(proposal))
+    import asyncio
+
+    asyncio.run(server.emit_pending_desktop_proposal(c, q))
+    ops = [json.loads(item)["op"] for item in q.items]
+    assert "desktop_confirm" in ops
+    assert "desktop_cursor_show" in ops
+    assert "desktop_cursor_move" in ops
+    assert server.latest_desktop_card()["action_id"] == "hooked"
+
+
+class _ProposalQueue:
+    def __init__(self):
+        self.items = []
+
+    def put_nowait(self, item):
+        self.items.append(item)
+
+
+def test_approval_is_bound_to_card_owner():
+    from jarvis.desktop.actions import create_desktop_action_proposal
+
+    action = _action("owned")
+    proposal = create_desktop_action_proposal(action)
+    server.adopt_pending_desktop_proposal(proposal, owner_id="owner-a")
+    c = server.Client()
+    c.desktop_control = FakeDesktop()
+    verdict = server.match_desktop_confirmation(
+        "yes, do it", server.latest_desktop_card(), client_id="owner-b")
+    assert verdict is None
+    assert server.latest_desktop_card()["owner_id"] == "owner-a"
+    verdict = server.match_desktop_confirmation(
+        "yes, do it", server.latest_desktop_card(), client_id="owner-a")
+    assert verdict["action_id"] == "owned"
+
+
+def test_native_relay_requires_backend_attestation():
+    token = server.sign_native_relay(
+        {"op": "desktop_cursor_hide", "action_id": "hooked"}, "relay-secret")
+    assert server.verify_native_relay(
+        {"op": "desktop_cursor_hide", "action_id": "hooked", "relay_sig": token},
+        "relay-secret")
+    assert not server.verify_native_relay(
+        {"op": "desktop_cursor_hide", "action_id": "hooked", "relay_sig": token},
+        "wrong-secret")
+    assert not server.verify_native_relay(
+        {"op": "desktop_cursor_hide", "action_id": "hooked"}, "relay-secret")
+
+
+def test_backend_emitted_cursor_ops_carry_relay_signature():
+    q = _ProposalQueue()
+    c = server.Client()
+    server.emit_signed(c, q, "desktop_cursor_hide", action_id="signed")
+    msg = json.loads(q.items[0])
+    assert server.verify_native_relay(msg, server.relay_secret())
+
+
+def test_relay_secret_is_not_embedded_in_page_bootstrap():
+    from pathlib import Path
+
+    source = (Path(server.__file__).parent / "static" / "index.html").read_text(
+        encoding="utf-8")
+    assert "__JARVIS_RELAY_SECRET" not in source
+    # The only injected task token is the pre-existing HTTP API token.
+    app = server.build_app()
+    assert not hasattr(app.state, "relay_secret")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (continued): every native overlay field is covered by the MAC.
+
+def test_relay_signature_covers_cursor_coordinates_and_state():
+    signed = server.sign_native_relay(
+        {"op": "desktop_cursor_move", "action_id": "a1", "x": 10, "y": 20,
+         "state": "scanning"}, "relay-secret")
+    event = {"op": "desktop_cursor_move", "action_id": "a1", "x": 10, "y": 20,
+             "state": "scanning", "relay_sig": signed}
+    assert server.verify_native_relay(event, "relay-secret")
+    for field, value in (("x", 999), ("y", 999), ("state", "acting")):
+        tampered = dict(event, **{field: value})
+        assert not server.verify_native_relay(tampered, "relay-secret")
+
+
+def test_relay_signature_covers_stop_action_and_reason():
+    signed = server.sign_native_relay(
+        {"op": "desktop_hud_action", "action": "stop", "reason": "hud stop"},
+        "relay-secret")
+    event = {"op": "desktop_hud_action", "action": "stop", "reason": "hud stop",
+             "relay_sig": signed}
+    assert server.verify_native_relay(event, "relay-secret")
+    assert not server.verify_native_relay(
+        dict(event, action="inject"), "relay-secret")
+    assert not server.verify_native_relay(
+        dict(event, reason="forged"), "relay-secret")
+
+
+def test_native_rejects_page_authored_ops_without_relay_signature():
+    """Page-authored desktop_* ops cannot pass the native trust boundary."""
+    import re
+    from pathlib import Path
+
+    base = Path(server.__file__).parent
+    app_context = (base / "OrbAppContext.cs").read_text(encoding="utf-8")
+    overlay = (base / "OverlayForm.cs").read_text(encoding="utf-8")
+    orb = (base / "OrbForm.cs").read_text(encoding="utf-8")
+    for source in (overlay, orb):
+        assert "OrbAppContext.IsTrustedRelay" in source
+    assert "if (!IsTrustedRelay(json)) return;" in app_context
+    # The shell's self-stop must go through the signed backend round trip, not
+    # a direct unsigned ApplyDesktopCursorCommand call.
+    match = re.search(r"private void OnDesktopStop\(string reason\)\s*\{(.*?)\n    \}",
+                      app_context, re.S)
+    assert match and "_cursorOverlay?.ApplyDesktopCursorCommand" not in match.group(1)
+    assert "PostOverlayBridge(\"desktop_hud_action\"" in match.group(1)
+    # Shell heartbeat proof comes from the native token, not a page field.
+    assert "ShellHeartbeatJson" in app_context
+
+
+def test_attached_shell_channel_is_shared_out_of_band():
+    """Attaching shells must not generate secrets that differ from the backend."""
+    from pathlib import Path
+
+    shell_host = (Path(server.__file__).parent / "ShellHost.cs").read_text(
+        encoding="utf-8")
+    assert "File.Exists(SecretFilePath)" in shell_host
+    assert "JARVIS_SHELL_TOKEN" in shell_host
+    assert "JARVIS_RELAY_SECRET" in shell_host
+    # The file lives under LocalApplicationData, not in the served page folder.
+    assert "Environment.SpecialFolder.LocalApplicationData" in shell_host
+    # Both sides use the same path and file shape.
+    assert "orb-desktop-channel.json" in Path(server.__file__).read_text(
+        encoding="utf-8")

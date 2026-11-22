@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hmac
 import threading
 import time
 from typing import Any
@@ -52,6 +53,11 @@ _LATEST_CARD: dict[str, Any] | None = None
 # own connection separately, and must never be able to prove overlay presence.
 _SHELL_EVENTS = ("shell_connected", "overlay_heartbeat")
 
+# Shared secrets are supplied out-of-band by the native shell process. They are
+# never embedded in index.html or any JS-readable state.
+_SHELL_TOKEN = ""
+_RELAY_SECRET = ""
+
 
 def _now() -> float:
     return time.time()
@@ -71,18 +77,42 @@ def mark_desktop_overlay(event: str, timestamp: float | None = None) -> None:
         _OVERLAY_TIMESTAMP = _now() if timestamp is None else float(timestamp)
 
 
+def arm_native_shell_channel(token: str, relay_secret: str = "") -> str:
+    """Receive the native shell's per-session secrets from the local host."""
+    global _SHELL_TOKEN, _RELAY_SECRET, _OVERLAY_TIMESTAMP
+    if not isinstance(token, str) or not token:
+        raise ValueError("native shell token required")
+    with _LOCK:
+        _SHELL_TOKEN = token
+        if relay_secret:
+            _RELAY_SECRET = str(relay_secret)
+        _OVERLAY_TIMESTAMP = _now()
+    return _SHELL_TOKEN
+
+
 def is_shell_origin(msg: dict[str, Any]) -> bool:
-    """True only for the C# shell's marked handshake/heartbeat ops.
+    """True only for shell heartbeats carrying the local native secret.
 
     The WebView page and native shell share a WebSocket. A page script can
-    emit arbitrary ops, so an explicit native-origin marker is required before
-    an op is allowed to arm the fail-closed overlay gate.
+    emit arbitrary ops and a literal ``source: "shell"`` field, so an
+    out-of-band secret is required before an op may arm the overlay gate.
     """
-    if not isinstance(msg, dict):
+    if not isinstance(msg, dict) or not _SHELL_TOKEN:
         return False
     op = msg.get("op")
-    return (op in _SHELL_EVENTS
-            and str(msg.get("source") or "").casefold() == "shell")
+    supplied = msg.get("token")
+    return (op in _SHELL_EVENTS and isinstance(supplied, str)
+            and hmac.compare_digest(supplied, _SHELL_TOKEN))
+
+
+def mark_native_shell_heartbeat(event: str, token: str) -> bool:
+    """Mark the shell latch only after the native token validates."""
+    global _OVERLAY_TIMESTAMP
+    if not is_shell_origin({"op": event, "token": token}):
+        return False
+    with _LOCK:
+        _OVERLAY_TIMESTAMP = _now()
+    return True
 
 
 def desktop_overlay_connected(now: float | None = None) -> bool:
@@ -116,8 +146,11 @@ def clear_desktop_card(reason: str = "new turn") -> None:
 
 
 def reset_desktop_session(reason: str = "reset") -> None:
-    """Drop heartbeat, card and pending state (tests, shell disconnect)."""
-    global _OVERLAY_TIMESTAMP
+    """Drop heartbeat and card state (tests, shell disconnect).
+
+    The native secrets are deliberately retained: a shell restart rotates the
+    token, but a lost heartbeat alone must not force a new out-of-band handshake.
+    """
     clear_desktop_card(reason)
     with _LOCK:
         _OVERLAY_TIMESTAMP = 0.0
@@ -248,7 +281,8 @@ def prepare_desktop_action(action: DesktopAction, overlay_connected: bool,
 
 
 def adopt_pending_desktop_proposal(proposal: dict[str, Any],
-                                   evidence: bytes = b"") -> dict[str, Any]:
+                                   evidence: bytes = b"",
+                                   owner_id: str = "") -> dict[str, Any]:
     """Build the card for a proposal already registered by the agent tools.
 
     Task 7 registers desktop actions in the Task 1 store. This bridge reads
@@ -288,7 +322,8 @@ def adopt_pending_desktop_proposal(proposal: dict[str, Any],
         }
     events = emit_desktop_action_events(action, evidence=evidence)
     card = {"status": "pending", "action_id": action.action_id,
-            "snapshot": copy.deepcopy(snapshot), "events": events}
+            "owner_id": str(owner_id or ""), "snapshot": copy.deepcopy(snapshot),
+            "events": events}
     with _LOCK:
         _LATEST_CARD = copy.deepcopy(card)
     return card
@@ -343,7 +378,8 @@ def resolve_desktop_confirmation(msg: dict[str, Any]) -> dict[str, Any]:
 
 
 def match_desktop_confirmation(text: str,
-                               card: dict[str, Any] | None) -> dict[str, Any] | None:
+                               card: dict[str, Any] | None,
+                               client_id: str = "") -> dict[str, Any] | None:
     """Map the card's typed phrase to an offline approval message.
 
     The chat host intercepts this before the model sees it: the model must not
@@ -351,6 +387,11 @@ def match_desktop_confirmation(text: str,
     required; any other text falls through to the normal turn.
     """
     if card is None or card.get("status") != "pending":
+        return None
+    owner = str(card.get("owner_id") or "")
+    if owner and not client_id:
+        return None
+    if owner and not hmac.compare_digest(owner, str(client_id)):
         return None
     normalized = " ".join(str(text or "").casefold().split())
     if normalized != CONFIRM_PHRASE.casefold():
@@ -401,6 +442,8 @@ __all__ = [
     "mark_desktop_overlay",
     "desktop_overlay_connected",
     "desktop_heartbeat_status",
+    "arm_native_shell_channel",
+    "mark_native_shell_heartbeat",
     "is_shell_origin",
     "clear_desktop_card",
     "adopt_pending_desktop_proposal",

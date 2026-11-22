@@ -7,6 +7,7 @@ This module never calls an OS API — execution belongs to a later task.
 from __future__ import annotations
 
 import copy
+import hmac
 import re
 import threading
 import time
@@ -69,6 +70,32 @@ class _PendingAction:
 _PENDING: Dict[str, _PendingAction] = {}
 _LOCK = threading.Lock()
 _AUDIT: Any = None
+# The orb reads this hook once per turn. It is set by create_desktop_action_proposal
+# so Task 7's tools only need the ordinary Task 1 proposal call to surface a card.
+_LATEST_PROPOSAL: Optional[dict] = None
+
+
+def consume_desktop_proposal() -> Optional[dict]:
+    """Take the newest proposal from this turn, once. No proposal is invented."""
+    global _LATEST_PROPOSAL
+    with _LOCK:
+        proposal = _LATEST_PROPOSAL
+        _LATEST_PROPOSAL = None
+    return copy.deepcopy(proposal)
+
+
+def _set_desktop_proposal_hook(proposal: dict) -> None:
+    """Set the hook for a proposal that was registered through the Task 1 API."""
+    global _LATEST_PROPOSAL
+    with _LOCK:
+        _LATEST_PROPOSAL = copy.deepcopy(proposal)
+
+
+def clear_desktop_proposal_hook() -> None:
+    """Forget an unconsumed hook when a new user turn begins."""
+    global _LATEST_PROPOSAL
+    with _LOCK:
+        _LATEST_PROPOSAL = None
 
 
 def configure_desktop_audit(logger: Any) -> None:
@@ -152,12 +179,13 @@ def _phrase_ok(approval: str) -> bool:
 
 def create_desktop_action_proposal(action: DesktopAction) -> dict:
     """Register a pending proposal and return the card payload. Never executes."""
+    global _LATEST_PROPOSAL
     snapshot = _snapshot_of(action)
     authoritative = _action_from_snapshot(snapshot)
     with _LOCK:
         _PENDING[action.action_id] = _PendingAction(authoritative, snapshot)
     _audit("proposed", authoritative, f"phrase={CONFIRM_PHRASE}")
-    return {
+    proposal = {
         "status": "pending",
         "action_id": authoritative.action_id,
         "action": authoritative.action_id,
@@ -173,6 +201,49 @@ def create_desktop_action_proposal(action: DesktopAction) -> dict:
             f"'{CONFIRM_PHRASE}' in the confirmation card."
         ),
     }
+    with _LOCK:
+        _LATEST_PROPOSAL = copy.deepcopy(proposal)
+    return proposal
+
+
+_UI_PHASES = frozenset(("", "scanning", "queued", "acting", "done", "stopped"))
+
+
+def sign_native_relay(payload: dict, secret: str) -> str:
+    """MAC for backend-to-shell cursor ops; the page cannot mint this value.
+
+    Every field the native overlay uses is covered: op, action id, status,
+    stop action, reason, coordinates, and cursor state. A page script that
+    modifies any of them invalidates the signature.
+    """
+    body = "|".join(
+        str(payload.get(key, "") if payload.get(key) is not None else "")
+        for key in ("op", "action_id", "status", "action", "reason",
+                    "x", "y", "state", "kind")
+    )
+    return hmac.new(str(secret).encode(), body.encode(), "sha256").hexdigest()
+
+
+def verify_native_relay(msg: dict, secret: str) -> bool:
+    """Constant-time check that a cursor op came through the backend."""
+    if not isinstance(msg, dict) or not isinstance(secret, str) or not secret:
+        return False
+    op = msg.get("op")
+    if not isinstance(op, str) or not op.startswith("desktop_"):
+        return False
+    # Restrict the signed surface to scalar fields the native overlay uses.
+    # Complex card fields (snapshot, crop, evidence) never drive the cursor and
+    # must not be relayed to it.
+    signed = {key: msg.get(key, "") for key in (
+        "op", "action_id", "status", "action", "reason",
+        "x", "y", "state", "kind")}
+    if any(isinstance(v, (dict, list)) for v in signed.values()):
+        return False
+    if str(signed.get("state") or "") not in _UI_PHASES:
+        return False
+    supplied = msg.get("relay_sig")
+    return (isinstance(supplied, str)
+            and hmac.compare_digest(supplied, sign_native_relay(signed, secret)))
 
 
 def resolve_desktop_action(action_id: str, approval: str, snapshot: dict) -> Optional[DesktopAction]:
@@ -228,6 +299,11 @@ __all__ = [
     "DesktopAction",
     "redact_sensitive",
     "create_desktop_action_proposal",
+    "consume_desktop_proposal",
+    "clear_desktop_proposal_hook",
+    "_set_desktop_proposal_hook",
+    "sign_native_relay",
+    "verify_native_relay",
     "resolve_desktop_action",
     "cancel_pending_desktop_actions",
     "configure_desktop_audit",

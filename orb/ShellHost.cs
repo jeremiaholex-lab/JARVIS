@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -9,6 +10,59 @@ public static class ShellHost
 {
     public const int Port = 8010;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(3) };
+    // ProcessRoot plus a user-scoped ACL: only the owning Windows user may
+    // open it. WebView JS cannot read files, and the file lives outside the
+    // checkout, so no page script can forge either out-of-band value. The file
+    // is shared by every shell attaching to one backend; a fresh backend gets
+    // fresh values.
+    private const string SecretFileName = "orb-desktop-channel.json";
+    private static readonly string SecretFilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "OpenJarvis", SecretFileName);
+    private static readonly string ShellToken;
+    private static readonly string RelaySecret;
+    private static readonly string NativeChannelError;
+
+    public static string NativeShellToken => ShellToken;
+    public static string NativeRelaySecret => RelaySecret;
+    /// <summary>Empty when the shared local channel is healthy.</summary>
+    public static string ChannelError => NativeChannelError;
+
+    static ShellHost()
+    {
+        // Read first: an attached second shell must use the backend's secrets.
+        if (File.Exists(SecretFilePath))
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(SecretFilePath));
+                var root = doc.RootElement;
+                ShellToken = root.GetProperty("shell_token").GetString() ?? "";
+                RelaySecret = root.GetProperty("relay_secret").GetString() ?? "";
+                NativeChannelError = "";
+                if (ShellToken.Length == 64 && RelaySecret.Length == 64) return;
+            }
+            catch { }
+        }
+        // First launch or a damaged file: create a fresh channel. The file is
+        // written before the child is started so an attached shell can share it.
+        ShellToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        RelaySecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(SecretFilePath)!);
+            File.WriteAllText(SecretFilePath,
+                "{\"shell_token\":\"" + ShellToken + "\",\"relay_secret\":\"" + RelaySecret + "\"}",
+                System.Text.Encoding.UTF8);
+            NativeChannelError = "";
+        }
+        catch (Exception ex)
+        {
+            // Fail closed: no environment secrets are passed, so the backend
+            // arms neither heartbeat nor relay until a usable channel exists.
+            NativeChannelError = ex.Message;
+        }
+    }
 
     public static (Process? backend, bool attached) Launch(bool appendLog = false)
     {
@@ -44,6 +98,13 @@ public static class ShellHost
         psi.Environment["OPENJARVIS_HOME"] = stateHome;
         psi.Environment["OPENJARVIS_SRC"] = srcRoot;
         psi.Environment["JARVIS_ORB_MANAGED"] = "1";
+        // Out-of-band channel: only the child process and this shell can read
+        // these values. The page is served HTML/JS and never sees them.
+        if (string.IsNullOrEmpty(NativeChannelError))
+        {
+            psi.Environment["JARVIS_SHELL_TOKEN"] = ShellToken;
+            psi.Environment["JARVIS_RELAY_SECRET"] = RelaySecret;
+        }
 
         var proc = Process.Start(psi)!;
         // appendLog: a supervised restart must not erase the crash evidence

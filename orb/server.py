@@ -91,8 +91,15 @@ from jarvis.desktop.executor import cancel_pending_desktop_actions
 # re-exports heartbeat and event helpers here so the orb and tests share one
 # import seam. The C# shell is a separate process; ops are emitted over /ws.
 from jarvis.desktop import overlay_protocol as _overlay
+from jarvis.desktop.actions import (
+    clear_desktop_proposal_hook,
+    consume_desktop_proposal,
+    sign_native_relay,
+    verify_native_relay,
+)
 from jarvis.desktop.overlay_protocol import (
     adopt_pending_desktop_proposal,
+    arm_native_shell_channel,
     clear_desktop_card,
     desktop_heartbeat_status,
     desktop_overlay_connected,
@@ -103,6 +110,7 @@ from jarvis.desktop.overlay_protocol import (
     latest_desktop_card,
     match_desktop_confirmation,
     mark_desktop_overlay,
+    mark_native_shell_heartbeat,
     prepare_desktop_action,
     reset_desktop_session,
     resolve_desktop_confirmation,
@@ -933,6 +941,114 @@ def agent_context():
     return AGENT
 
 
+# The managed native shell passes per-session secrets in its child environment.
+# HTML/JS cannot read these; a standalone server persists the same user-scoped
+# channel file the C# shell reads, so attached windows share one backend's keys.
+_CHANNEL_FILE = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenJarvis" / "orb-desktop-channel.json"
+
+
+def _persist_native_channel(shell_token: str, relay_secret: str) -> None:
+    """Write the local-only channel file; never log or echo its values."""
+    try:
+        _CHANNEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CHANNEL_FILE.write_text(json.dumps({
+            "shell_token": shell_token,
+            "relay_secret": relay_secret,
+        }), encoding="utf-8")
+    except OSError:
+        # The in-memory pair still works for this process. An attached shell
+        # will fail closed if it cannot read the channel, which is safe.
+        pass
+
+
+def _load_native_channel() -> tuple[str, str]:
+    env_shell = os.environ.get("JARVIS_SHELL_TOKEN") or ""
+    env_relay = os.environ.get("JARVIS_RELAY_SECRET") or ""
+    if env_shell and env_relay:
+        _persist_native_channel(env_shell, env_relay)
+        return env_shell, env_relay
+    if bool(env_shell) != bool(env_relay):
+        # Partial secrets are not a usable channel; fail closed.
+        return "", ""
+    try:
+        saved = json.loads(_CHANNEL_FILE.read_text(encoding="utf-8"))
+        shell_token, relay_secret = str(saved["shell_token"]), str(saved["relay_secret"])
+        if len(shell_token) == 64 and len(relay_secret) == 64:
+            return shell_token, relay_secret
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    shell_token, relay_secret = secrets.token_hex(32), secrets.token_hex(32)
+    _persist_native_channel(shell_token, relay_secret)
+    return shell_token, relay_secret
+
+
+_shell_from_env, _relay_from_env = _load_native_channel()
+_RELAY_SECRET = _relay_from_env or secrets.token_urlsafe(32)
+if _shell_from_env and _relay_from_env:
+    arm_native_shell_channel(_shell_from_env, _RELAY_SECRET)
+
+
+def relay_secret() -> str:
+    """Secret shared only with the native shell, never sent to the page."""
+    return _RELAY_SECRET
+
+
+def set_pending_desktop_proposal(proposal: dict) -> None:
+    """Mirror the Task 1 proposal hook for tests and non-orb hosts."""
+    from jarvis.desktop.actions import _set_desktop_proposal_hook
+
+    _set_desktop_proposal_hook(proposal)
+
+
+async def emit_pending_desktop_proposal(c: Client, q) -> None:
+    """Consume the Task 1 proposal hook written by a real tool call."""
+    proposal = consume_desktop_proposal()
+    if proposal is None:
+        return
+    # The agent tools return create_desktop_action_proposal() as JSON text;
+    # other Task 1 callers pass the dict. Accept both without inventing one.
+    if isinstance(proposal, str):
+        try:
+            proposal = json.loads(proposal)
+        except (TypeError, ValueError):
+            return
+    if not isinstance(proposal, dict):
+        return
+    # The hook was populated by create_desktop_action_proposal; do not
+    # register a competing proposal here.
+    await adopt_desktop_proposal(c, q, proposal, owner_id=c.client_id)
+
+
+async def adopt_desktop_proposal(c: Client, q, proposal: dict,
+                                 owner_id: str = "") -> None:
+    """Bridge a Task 1 proposal from the agent tools into the /ws card.
+
+    The proposal is already pending in the shared store; adoption only builds
+    the card and cursor marker. A dead shell overlay still blocks the card, so
+    invisible input can never be prepared. The card is owned by the client that
+    requested the turn; a different connection cannot approve it.
+    """
+    card = adopt_pending_desktop_proposal(
+        proposal, evidence=proposal.get("crop_bytes", b""),
+        owner_id=str(owner_id or ""))
+    if card["status"] != "pending":
+        return
+    for event in card["events"]:
+        # Sign once at the backend boundary. The page receives events over /ws
+        # and echoes them to the native shell; the shell verifies this MAC.
+        emit_signed(c, q, event["op"],
+                    **{k: v for k, v in event.items() if k != "op"})
+
+
+def emit_signed(c: Client, q, op: str, **kw) -> None:
+    """Emit a backend-origin op that the native shell may relay."""
+    if op.startswith("desktop_"):
+        event = {"op": op, **kw}
+        kw = {k: v for k, v in event.items() if k != "op"}
+        kw["relay_sig"] = sign_native_relay(event, relay_secret())
+    c.emit(q, op, **kw)
+
+
 class Client:
     """One orb window connection and its audio-accumulation state."""
 
@@ -1627,33 +1743,32 @@ def build_app():
         return text, time.time() - t0
 
     async def emit_desktop_card(c: Client, q) -> None:
-        """Emit the pending desktop card through the same /ws pump as edits."""
+        """Adopt this turn's real proposal, then emit the card and cursor ops."""
+        await emit_pending_desktop_proposal(c, q)
         card = latest_desktop_card()
         if card is None:
             return
         for event in card["events"]:
             # Only the confirmation card is user-visible; the rest of the
-            # sequence drives the shell overlay.
-            c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
-
-    async def adopt_desktop_proposal(c: Client, q, proposal: dict) -> None:
-        """Bridge a Task 1 proposal from the agent tools into the /ws card.
-
-        The proposal is already pending in the shared store; adoption only
-        builds the card and cursor marker. A dead shell overlay still blocks
-        the card, so invisible input can never be prepared.
-        """
-        card = adopt_pending_desktop_proposal(
-            proposal, evidence=proposal.get("crop_bytes", b""))
-        if card["status"] == "pending":
-            await emit_desktop_card(c, q)
-            return
-        for event in card["events"]:
-            c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
+            # sequence drives the shell overlay. MAC every op so the page
+            # cannot synthesize a cursor command in the native relay.
+            emit_signed(c, q, event["op"],
+                        **{k: v for k, v in event.items() if k != "op"})
 
     async def settle_desktop_confirmation(c: Client, q, msg: dict) -> None:
         """Typed phrase + exact snapshot + live overlay, or nothing executes."""
         from jarvis.desktop.win32_control import DesktopControl
+
+        # A /ws desktop_confirm op has no client_id field of its own. Bind it
+        # to the connection that received it so a second window cannot approve
+        # a card owned by the first window's turn.
+        card = latest_desktop_card()
+        owner = str((card or {}).get("owner_id") or "")
+        if owner and not hmac.compare_digest(owner, str(c.client_id)):
+            return
+        if (card is not None
+                and str(msg.get("action_id") or "") != str(card.get("action_id") or "")):
+            return
 
         if c.desktop_control is None:
             # Constructed lazily on the orb host only; tests inject fakes.
@@ -1663,7 +1778,8 @@ def build_app():
         action_id = str(msg.get("action_id") or result.get("action_id") or "")
         detail = result.get("error") or result.get("reason") or "blocked"
         for event in desktop_cursor_result_events(action_id, result["status"], detail):
-            c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
+            emit_signed(c, q, event["op"],
+                        **{k: v for k, v in event.items() if k != "op"})
         if result["status"] != "ok":
             # Shared redaction policy plus textContent rendering in index.html:
             # an OS fault must never echo a raw sensitive path on the card.
@@ -1689,6 +1805,7 @@ def build_app():
         from jarvis.desktop.executor import reset_cancel
         reset_cancel()
         clear_desktop_card("new turn")
+        clear_desktop_proposal_hook()
 
         ctx = agent_context()
         t0 = time.time()
@@ -2401,17 +2518,15 @@ def build_app():
                 c.overlay_seen_at = time.time()
                 c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
             elif op in ("shell_connected", "overlay_heartbeat"):
-                # Only the C# shell announces itself and pings, and only when
-                # it carries the native-origin marker. A stale or missing
-                # heartbeat blocks every desktop action.
-                if is_shell_origin(msg):
+                # Only the native shell's out-of-band token arms the gate.
+                if mark_native_shell_heartbeat(op, str(msg.get("token") or "")):
                     c.overlay_seen_at = time.time()
-                    mark_desktop_overlay(op)
                 c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
             elif op == "desktop_hud_action":
                 # HUD Stop / Ctrl+Alt+J: settle the pending card and cursor.
                 for event in stop_desktop_action(str(msg.get("reason") or "hud stop")):
-                    c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
+                    emit_signed(c, q, event["op"],
+                                **{k: v for k, v in event.items() if k != "op"})
             elif op == "desktop_confirm":
                 await settle_desktop_confirmation(c, q, msg)
             elif op == "audio":
@@ -2430,7 +2545,7 @@ def build_app():
                 # proposal. The exact snapshot comes from the card latch, not
                 # from free text.
                 desktop_verdict = match_desktop_confirmation(
-                    text, latest_desktop_card())
+                    text, latest_desktop_card(), client_id=c.client_id)
                 if desktop_verdict is not None:
                     await settle_desktop_confirmation(c, q, desktop_verdict)
                     continue

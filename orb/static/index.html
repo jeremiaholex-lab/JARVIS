@@ -977,10 +977,8 @@
     // HUD stop through the same /ws connection as the page.
     bridge(msg) {
       if (!msg || typeof msg.op !== "string") return true;
-      // Only the native shell may emit heartbeat ops through this bridge;
-      // a page script cannot mark its own message as shell-originated.
-      if ((msg.op === "shell_connected" || msg.op === "overlay_heartbeat")
-          && msg.source !== "shell") return true;
+      // Heartbeats are native-only. A page script can call wsSend directly, so
+      // the backend validates an out-of-band token instead of this field.
       wsSend(msg.op, msg);
       return true;
     },
@@ -1171,6 +1169,7 @@
   // spoof backend events; only ops the backend actually emitted are forwarded.
   function forwardOverlayOp(m) {
     if (!OVERLAY_OPS.has(m.op)) return;
+    if (typeof m.relay_sig !== "string") return;
     try { window.chrome && window.chrome.webview &&
       window.chrome.webview.postMessage(JSON.stringify(m)); } catch (e) {}
   }

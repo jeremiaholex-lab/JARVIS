@@ -20,9 +20,12 @@ in the executor, not the UI.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import secrets
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,11 +38,26 @@ _logger = logging.getLogger(__name__)
 # Names only. Execution is local and read-only; nothing here mutates state.
 _READ_TOOL_NAMES = ("jarvis_projects_read", "jarvis_rag_search")
 
+_DESKTOP_PROPOSAL_TTL_SECONDS = 120.0  # typed-approval window
+
+# Desktop tools are side-effect-free proposers: calling one registers a
+# pending DesktopAction and returns a confirmation card payload; no OS input
+# happens here.
+_DESKTOP_PROPOSER_NAMES = (
+    "desktop_open_app",
+    "desktop_open_file",
+    "desktop_move_cursor",
+    "desktop_click",
+    "desktop_scroll",
+    "desktop_type",
+    "desktop_press_keys",
+)
+
 # Non-READ tools execute() will still run, because their fn is a side-effect
 # free *proposer*: it only queues a pending change for host confirmation. The
 # list must stay tiny and explicit — a new write tool is not callable here
 # until it is added to this tuple and proven to do no mutation on its own.
-_PROPOSE_ONLY_TOOLS = ("jarvis_projects_write", "jarvis_file_edit")
+_PROPOSE_ONLY_TOOLS = ("jarvis_projects_write", "jarvis_file_edit") + _DESKTOP_PROPOSER_NAMES
 
 # Non-READ tools execute() runs because their effect is local, reversible and
 # actually happens (unlike a proposer). An explicit "remember this" belongs in
@@ -369,6 +387,62 @@ def _projects_write(action: str = "", name: str = "", path: str = "",
             params[key] = val
     out = _WRITE_EXECUTOR.propose(params)
     return json.dumps(out, ensure_ascii=False)
+
+
+def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
+    """Propose one desktop action; never performs OS input (Task 1)."""
+    from jarvis.desktop.actions import (
+        DesktopAction,
+        create_desktop_action_proposal,
+        redact_sensitive,
+    )
+
+    safe_target = copy.deepcopy(target)
+    # Descriptions/titles are redacted before they can reach a card.
+    for key in ("title", "name_or_path", "path", "text", "keys", "description"):
+        if isinstance(safe_target.get(key), str):
+            safe_target[key] = redact_sensitive(safe_target[key])
+    safe_evidence = {
+        key: redact_sensitive(value) if isinstance(value, str) else copy.deepcopy(value)
+        for key, value in evidence.items()
+    }
+    action = DesktopAction(
+        action_id="da_" + secrets.token_hex(8),
+        kind=kind,
+        target=safe_target,
+        risk="write",
+        evidence=safe_evidence,
+        expires_at=time.time() + _DESKTOP_PROPOSAL_TTL_SECONDS,
+    )
+    return json.dumps(create_desktop_action_proposal(action), ensure_ascii=False)
+
+
+def _desktop_open_app(name_or_path: str) -> str:
+    return _propose_desktop_action("open_app", {"name_or_path": name_or_path}, {})
+
+
+def _desktop_open_file(path: str) -> str:
+    return _propose_desktop_action("open_file", {"path": path}, {})
+
+
+def _desktop_move_cursor(x: int, y: int, monitor=None) -> str:
+    return _propose_desktop_action("move_cursor", {"x": x, "y": y, "monitor": monitor}, {})
+
+
+def _desktop_click(x: int, y: int, button: str = "left", clicks: int = 1) -> str:
+    return _propose_desktop_action("click", {"x": x, "y": y, "button": button, "clicks": clicks}, {})
+
+
+def _desktop_scroll(x: int, y: int, direction: str, amount: int) -> str:
+    return _propose_desktop_action("scroll", {"x": x, "y": y, "direction": direction, "amount": amount}, {})
+
+
+def _desktop_type(text: str, x=None, y=None) -> str:
+    return _propose_desktop_action("type", {"text": text, "x": x, "y": y}, {})
+
+
+def _desktop_press_keys(keys, x=None, y=None) -> str:
+    return _propose_desktop_action("press_keys", {"keys": keys, "x": x, "y": y}, {})
 
 
 def _file_edit(action: str = "", path: str = "", old_string: str = "",
@@ -1035,6 +1109,79 @@ def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[Agent
         fn=_remember,
         tier=Tier.WRITE,
     ))
+    # Desktop control (Task 1): all state-changing tools are non-READ builtins
+    # whose functions only propose a confirmed action. No OS input occurs here.
+    _DESKTOP_SCHEMAS: Dict[str, tuple[str, Callable[..., str], Dict[str, Any]]] = {
+        "desktop_open_app": (
+            "Propose opening a common application, document, folder, or .lnk shortcut. "
+            "Executables, scripts and URLs are not supported in v1. NOTHING is opened "
+            "until the user types the confirmation phrase.",
+            _desktop_open_app,
+            {"type": "object", "properties": {"name_or_path": {"type": "string"}},
+             "required": ["name_or_path"]},
+        ),
+        "desktop_open_file": (
+            "Propose opening one document or folder. NOTHING is opened until the user "
+            "types the confirmation phrase.",
+            _desktop_open_file,
+            {"type": "object", "properties": {"path": {"type": "string"}},
+             "required": ["path"]},
+        ),
+        "desktop_move_cursor": (
+            "Propose moving the desktop cursor to a coordinate. No pointer movement "
+            "happens until the user types the confirmation phrase.",
+            _desktop_move_cursor,
+            {"type": "object", "properties": {
+                "x": {"type": "integer"}, "y": {"type": "integer"},
+                "monitor": {"type": ["integer", "null"]}},
+             "required": ["x", "y"]},
+        ),
+        "desktop_click": (
+            "Propose a mouse click at a coordinate. No click happens until the user "
+            "types the confirmation phrase.",
+            _desktop_click,
+            {"type": "object", "properties": {
+                "x": {"type": "integer"}, "y": {"type": "integer"},
+                "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                "clicks": {"type": "integer"}},
+             "required": ["x", "y"]},
+        ),
+        "desktop_scroll": (
+            "Propose scrolling at a coordinate. No scroll happens until the user types "
+            "the confirmation phrase.",
+            _desktop_scroll,
+            {"type": "object", "properties": {
+                "x": {"type": "integer"}, "y": {"type": "integer"},
+                "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                "amount": {"type": "integer"}},
+             "required": ["x", "y", "direction", "amount"]},
+        ),
+        "desktop_type": (
+            "Propose typing exact text on the desktop. No keystroke happens until the "
+            "user types the confirmation phrase.",
+            _desktop_type,
+            {"type": "object", "properties": {
+                "text": {"type": "string"},
+                "x": {"type": ["integer", "null"]}, "y": {"type": ["integer", "null"]}},
+             "required": ["text"]},
+        ),
+        "desktop_press_keys": (
+            "Propose pressing a list of keys on the desktop. No keystroke happens until "
+            "the user types the confirmation phrase.",
+            _desktop_press_keys,
+            {"type": "object", "properties": {
+                "keys": {"type": "array", "items": {"type": "string"}},
+                "x": {"type": ["integer", "null"]}, "y": {"type": ["integer", "null"]}},
+             "required": ["keys"]},
+        ),
+    }
+    for name in _DESKTOP_PROPOSER_NAMES:
+        description, fn, parameters = _DESKTOP_SCHEMAS[name]
+        tools.append(AgentTool(
+            name=name, description=description, parameters=parameters,
+            fn=fn, tier=Tier.DESTRUCTIVE,
+        ))
+
     from jarvis.agent.registry import ToolRegistry
     registry = ToolRegistry()
     registry.register_many(tools, builtin=True)

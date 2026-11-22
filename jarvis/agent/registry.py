@@ -20,6 +20,15 @@ _BUILTIN_NON_READ = {
     "jarvis_projects_write": Tier.WRITE,
     "jarvis_file_edit": Tier.DESTRUCTIVE,
     "jarvis_remember": Tier.WRITE,
+    # Desktop tools are non-READ builtins. Their functions only propose a
+    # confirmed action; no OS input happens here.
+    "desktop_open_app": Tier.DESTRUCTIVE,
+    "desktop_open_file": Tier.DESTRUCTIVE,
+    "desktop_move_cursor": Tier.DESTRUCTIVE,
+    "desktop_click": Tier.DESTRUCTIVE,
+    "desktop_scroll": Tier.DESTRUCTIVE,
+    "desktop_type": Tier.DESTRUCTIVE,
+    "desktop_press_keys": Tier.DESTRUCTIVE,
 }
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 

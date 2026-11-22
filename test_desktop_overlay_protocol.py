@@ -411,6 +411,24 @@ def test_proposal_hook_is_consumed_by_real_orb_turn():
     assert server.latest_desktop_card()["action_id"] == "hooked"
 
 
+def test_proposal_hook_forwards_local_crop_to_card():
+    """The orb handoff must carry the tool's locally generated PNG bytes."""
+    import asyncio
+
+    crop = b"\x89PNG\r\n\x1a\nlocal-crop"
+    action = _action("cropped")
+    proposal = create_desktop_action_proposal(action)
+    proposal["crop_bytes"] = crop
+    q = _ProposalQueue()
+    c = server.Client()
+    c.desktop_control = FakeDesktop()
+    server.set_pending_desktop_proposal(proposal)
+    asyncio.run(server.emit_pending_desktop_proposal(c, q))
+    confirm = next(json.loads(item) for item in q.items
+                   if json.loads(item)["op"] == "desktop_confirm")
+    assert confirm["crop"] == "data:image/png;base64," + base64.b64encode(crop).decode("ascii")
+
+
 class _ProposalQueue:
     def __init__(self):
         self.items = []

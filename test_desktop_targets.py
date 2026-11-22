@@ -151,6 +151,13 @@ def test_local_paths_with_sensitive_names_are_allowed():
         assert allowed is True
 
 
+def test_target_policy_does_not_import_or_duplicate_redaction():
+    """Target validation is launch safety; redaction belongs in card evidence."""
+    import jarvis.desktop.targets as targets
+
+    assert not hasattr(targets, "redact_sensitive")
+
+
 def test_target_reasons_are_english_only():
     for target in ("app.exe", "https://example.com", "Notes.txt"):
         _allowed, reason = validate_launch_target(target)

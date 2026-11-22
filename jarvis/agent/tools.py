@@ -20,6 +20,7 @@ in the executor, not the UI.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import logging
@@ -389,6 +390,43 @@ def _projects_write(action: str = "", name: str = "", path: str = "",
     return json.dumps(out, ensure_ascii=False)
 
 
+def _desktop_capture_control():
+    """Boundary used only for crop geometry. Constructed lazily, never in tests.
+
+    ``capture_target_crop`` reads window geometry through this control; it does
+    not move the cursor, click, type, scroll, or open anything. Keeping the
+    factory here lets tests substitute a fake without importing Win32 ctypes.
+    """
+    from jarvis.desktop.win32_control import Win32DesktopControl
+
+    return Win32DesktopControl()
+
+
+def _desktop_crop_bytes(target: dict) -> str:
+    """Return a locally captured confirmation crop, or fail closed.
+
+    Sensitive windows and capture faults veto the proposal: no card is created
+    when the crop cannot be safely produced. The PNG stays local as base64 text
+    for the orb handoff; it is never uploaded and never enters the snapshot.
+    """
+    x, y = target.get("x"), target.get("y")
+    if (x is None or y is None) or (
+        (isinstance(x, str) and not x.strip()) or (isinstance(y, str) and not y.strip())
+    ):
+        return ""
+    from jarvis.desktop.evidence import (
+        SensitiveTargetError,
+        capture_target_crop,
+    )
+    from jarvis.vision.screen import ScreenCaptureError
+
+    try:
+        png = capture_target_crop(_desktop_capture_control(), int(x), int(y), radius=160)
+    except (SensitiveTargetError, ScreenCaptureError, ValueError, OSError, TypeError):
+        return ""
+    return base64.b64encode(png).decode("ascii")
+
+
 def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
     """Propose one desktop action; never performs OS input (Task 1).
 
@@ -439,6 +477,23 @@ def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
         # approved action the executor receives still carries it.
         safe_evidence["password_warning"] = True
     proposal = create_desktop_action_proposal(action)
+    if kind in ("move_cursor", "click", "scroll"):
+        crop = _desktop_crop_bytes(safe_target)
+        if not crop:
+            # A sensitive window or failed local capture vetoes the card. The
+            # pending action is discarded; no approval key can release it.
+            from jarvis.desktop.actions import cancel_pending_desktop_actions
+
+            cancel_pending_desktop_actions("crop capture unavailable")
+            return json.dumps({
+                "error": "No safe local screenshot crop was available; no card was created.",
+                "status": "rejected",
+                "note": "Nothing was done.",
+            }, ensure_ascii=False)
+        proposal["crop_bytes"] = crop
+        from jarvis.desktop.actions import _set_desktop_proposal_hook
+
+        _set_desktop_proposal_hook(proposal)
     if password_warning:
         proposal["password_warning"] = True
         proposal["note"] += (

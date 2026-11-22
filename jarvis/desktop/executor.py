@@ -134,6 +134,16 @@ class DesktopActionExecutor:
             action_id, approval, snapshot
         )
         if action is None:
+            # Every failure is audited, including "never proposed" and
+            # "already spent" — a client replaying a consumed id N times
+            # must not vanish from the trail. Task 1 audits its own
+            # "denied"/"expired" paths; the not-found and already-settled
+            # paths settle here, reconstructed from the snapshot.
+            _audit(
+                "failed",
+                _action_from_id_or_snapshot(action_id, snapshot),
+                "proposal not found or already consumed",
+            )
             return {
                 "status": "failed",
                 "action_id": action_id,

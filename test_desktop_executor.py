@@ -179,6 +179,57 @@ def test_unknown_action_id_fails_closed():
     assert result["status"] != "ok"
 
 
+def test_unknown_action_id_is_audited():
+    """I-1: an id that was never proposed leaves a failed audit entry —
+    a client replaying an unknown id N times must not vanish from the
+    trail."""
+    events: list[str] = []
+
+    class FakeAudit:
+        def log(self, event):
+            events.append(event.content_preview)
+
+    configure_desktop_audit(FakeAudit())
+    try:
+        executor = DesktopActionExecutor(FakeDesktop())
+        result = executor.execute(
+            "never-proposed", "yes, do it", _snapshot(_click_action("never-proposed"))
+        )
+    finally:
+        configure_desktop_audit(None)
+
+    assert result["status"] == "failed"
+    kinds = _audit_kinds(events)
+    assert kinds and kinds[-1] == "failed", kinds
+
+
+def test_spent_action_id_replay_is_audited():
+    """I-1: after a card is consumed by a success, replaying the same id
+    leaves a failed audit entry (not just a silent failure)."""
+    events: list[str] = []
+
+    class FakeAudit:
+        def log(self, event):
+            events.append(event.content_preview)
+
+    configure_desktop_audit(FakeAudit())
+    try:
+        fake = FakeDesktop()
+        executor = DesktopActionExecutor(fake)
+        action = _click_action()
+        snapshot = create_desktop_action_proposal(action)["snapshot"]
+        assert executor.execute(action.action_id, "yes, do it", snapshot)["status"] == "ok"
+        replay = executor.execute(action.action_id, "yes, do it", snapshot)
+    finally:
+        configure_desktop_audit(None)
+
+    assert replay["status"] == "failed"
+    kinds = _audit_kinds(events)
+    # The success was audited; the replay failure must be too.
+    assert kinds[-1] == "failed", kinds
+    assert fake.calls.count(("click", 10, 20, "left", 1)) == 1
+
+
 def test_execution_failure_is_reported_and_never_retryable():
     fake = BrokenDesktop()
     executor = DesktopActionExecutor(fake)

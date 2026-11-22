@@ -976,7 +976,12 @@
     // C# shell bridge: it calls this with {op: ...} to send a heartbeat or a
     // HUD stop through the same /ws connection as the page.
     bridge(msg) {
-      if (msg && typeof msg.op === "string") wsSend(msg.op, msg);
+      if (!msg || typeof msg.op !== "string") return true;
+      // Only the native shell may emit heartbeat ops through this bridge;
+      // a page script cannot mark its own message as shell-originated.
+      if ((msg.op === "shell_connected" || msg.op === "overlay_heartbeat")
+          && msg.source !== "shell") return true;
+      wsSend(msg.op, msg);
       return true;
     },
     setMicEnabled(on) {
@@ -1220,9 +1225,15 @@
     const card = $("dac_" + (m.action_id || "")); if (!card) return;
     const typed = card.querySelector(".wc-typed"); if (typed) typed.remove();
     const btns = card.querySelector(".wc-actions");
-    if (btns) btns.innerHTML = '<span class="wc-done">' +
-      (m.status === "ok" ? "Done." : m.status === "cancelled" ? "Stopped." :
-        "Not done: " + (m.reason || m.error || "blocked")) + '</span>';
+    if (btns) {
+      btns.replaceChildren();
+      const done = document.createElement("span");
+      done.className = "wc-done";
+      done.textContent = m.status === "ok" ? "Done." :
+        m.status === "cancelled" ? "Stopped." :
+          "Not done: " + (m.reason || m.error || "blocked");
+      btns.appendChild(done);
+    }
   }
 
   $("composer").addEventListener("submit", (e) => {

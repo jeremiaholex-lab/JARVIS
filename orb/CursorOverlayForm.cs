@@ -100,7 +100,8 @@ public sealed class CursorOverlayForm : Form
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("op", out var opEl)) return;
+                || !root.TryGetProperty("op", out var opEl)
+                || opEl.ValueKind != JsonValueKind.String) return;
             string op = opEl.GetString() ?? "";
             if (IsInvisibleInputOp(op)) return;  // never act on hidden-input claims
 

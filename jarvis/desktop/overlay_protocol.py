@@ -23,6 +23,7 @@ from typing import Any
 
 from jarvis.desktop.actions import (
     DesktopAction,
+    _action_from_snapshot,
     _snapshot_of,
     cancel_pending_desktop_actions as _cancel_pending,
     create_desktop_action_proposal,
@@ -35,6 +36,7 @@ from jarvis.desktop.executor import (
     reset_cancel,
 )
 from jarvis.desktop.win32_control import DesktopControl
+from jarvis.security.file_edit import CONFIRM_PHRASE
 
 HEARTBEAT_TIMEOUT_S = 5.0
 # Descriptions are previews; the exact action stays in the approval snapshot.
@@ -46,6 +48,9 @@ _DISPLAY_KEYS = (
 _LOCK = threading.Lock()
 _OVERLAY_TIMESTAMP = 0.0
 _LATEST_CARD: dict[str, Any] | None = None
+# Only the C# shell may arm the fail-closed gate. The web page announces its
+# own connection separately, and must never be able to prove overlay presence.
+_SHELL_EVENTS = ("shell_connected", "overlay_heartbeat")
 
 
 def _now() -> float:
@@ -53,17 +58,31 @@ def _now() -> float:
 
 
 def mark_desktop_overlay(event: str, timestamp: float | None = None) -> None:
-    """Record a shell handshake/heartbeat event from the orb websocket.
+    """Record a C# shell handshake/heartbeat event from the orb websocket.
 
-    Any recognised event proves the shell overlay is alive at ``timestamp``.
-    Unknown events are ignored so a stray client cannot keep a dead shell
-    artificially connected.
+    Page-only announcements such as "overlay_connected" and "connected" are
+    ignored: any web script could send them, and they prove nothing about the
+    native layer that would make an input visible to the operator.
     """
     global _OVERLAY_TIMESTAMP
-    if event not in ("connected", "heartbeat"):
+    if event not in _SHELL_EVENTS:
         return
     with _LOCK:
         _OVERLAY_TIMESTAMP = _now() if timestamp is None else float(timestamp)
+
+
+def is_shell_origin(msg: dict[str, Any]) -> bool:
+    """True only for the C# shell's marked handshake/heartbeat ops.
+
+    The WebView page and native shell share a WebSocket. A page script can
+    emit arbitrary ops, so an explicit native-origin marker is required before
+    an op is allowed to arm the fail-closed overlay gate.
+    """
+    if not isinstance(msg, dict):
+        return False
+    op = msg.get("op")
+    return (op in _SHELL_EVENTS
+            and str(msg.get("source") or "").casefold() == "shell")
 
 
 def desktop_overlay_connected(now: float | None = None) -> bool:
@@ -89,12 +108,19 @@ def desktop_heartbeat_status(now: float | None = None) -> dict[str, Any]:
     }
 
 
+def clear_desktop_card(reason: str = "new turn") -> None:
+    """Forget the one-action card latch without cancelling this turn's proposal."""
+    global _LATEST_CARD
+    with _LOCK:
+        _LATEST_CARD = None
+
+
 def reset_desktop_session(reason: str = "reset") -> None:
     """Drop heartbeat, card and pending state (tests, shell disconnect)."""
-    global _OVERLAY_TIMESTAMP, _LATEST_CARD
+    global _OVERLAY_TIMESTAMP
+    clear_desktop_card(reason)
     with _LOCK:
         _OVERLAY_TIMESTAMP = 0.0
-        _LATEST_CARD = None
     _cancel_executor_pending(reason)
     reset_cancel()
 
@@ -123,11 +149,12 @@ def _safe_display(action: DesktopAction) -> dict[str, Any]:
 
 
 def emit_desktop_action_events(action: DesktopAction, evidence: bytes = b"") -> list[dict]:
-    """Produce the fixed, ordered overlay event sequence for one action.
+    """Produce the proposal-time event sequence for one action.
 
-    The sequence is: confirmation card, cursor reveal, target move, scanning,
-    acting, done, hide, and result. The card carries the exact snapshot, a
-    redacted preview, typed-phrase requirement and a local crop data URI.
+    The operator sees the confirmation card and a scanning marker while the
+    proposal is open. Acting/done/hide are emitted only after a typed approval
+    via :func:`desktop_cursor_result_events`; a card must not flash an "acting"
+    cursor before the operator has approved it.
     """
     target = action.target or {}
     x = target.get("x")
@@ -153,13 +180,22 @@ def emit_desktop_action_events(action: DesktopAction, evidence: bytes = b"") -> 
          "x": x, "y": y},
         {"op": "desktop_cursor_state", "action_id": action.action_id,
          "state": "scanning"},
-        {"op": "desktop_cursor_state", "action_id": action.action_id,
-         "state": "acting"},
-        {"op": "desktop_cursor_state", "action_id": action.action_id,
-         "state": "done"},
-        {"op": "desktop_cursor_hide", "action_id": action.action_id},
-        {"op": "desktop_result", "action_id": action.action_id,
-         "status": "pending"},
+    ]
+
+
+def desktop_cursor_result_events(action_id: str, status: str,
+                                 reason: str = "") -> list[dict]:
+    """Cursor settle + result after an approval attempt, never at proposal."""
+    result: dict[str, Any] = {"op": "desktop_result", "action_id": action_id,
+                              "status": status}
+    if reason:
+        # One shared redaction policy; no duplicate sensitive matching rules.
+        result["reason"] = redact_sensitive(" ".join(str(reason).split()))
+    return [
+        {"op": "desktop_cursor_state", "action_id": action_id, "state": "acting"},
+        {"op": "desktop_cursor_state", "action_id": action_id, "state": "done"},
+        {"op": "desktop_cursor_hide", "action_id": action_id},
+        result,
     ]
 
 
@@ -206,6 +242,53 @@ def prepare_desktop_action(action: DesktopAction, overlay_connected: bool,
         "snapshot": proposal["snapshot"],
         "events": events,
     }
+    with _LOCK:
+        _LATEST_CARD = copy.deepcopy(card)
+    return card
+
+
+def adopt_pending_desktop_proposal(proposal: dict[str, Any],
+                                   evidence: bytes = b"") -> dict[str, Any]:
+    """Build the card for a proposal already registered by the agent tools.
+
+    Task 7 registers desktop actions in the Task 1 store. This bridge reads
+    that proposal's immutable snapshot instead of creating a second proposal,
+    so the exact approved payload and the one-shot store are never duplicated.
+    A dead overlay or an existing card still fails closed.
+    """
+    global _LATEST_CARD
+    snapshot = proposal.get("snapshot") or {}
+    action_id = str(proposal.get("action_id") or "")
+    if (not desktop_overlay_connected() or is_cancelled()
+            or latest_desktop_card() is not None):
+        reason = ("overlay unavailable" if not desktop_overlay_connected()
+                  else "stop requested" if is_cancelled()
+                  else "one desktop action per request")
+        return {
+            "status": "blocked", "action_id": action_id,
+            "snapshot": copy.deepcopy(snapshot), "reason": reason,
+            "events": [{"op": "desktop_result", "action_id": action_id,
+                        "status": "blocked", "reason": reason}],
+        }
+    try:
+        action = _action_from_snapshot(snapshot)
+    except (KeyError, TypeError, ValueError):
+        return {
+            "status": "blocked", "action_id": action_id,
+            "snapshot": copy.deepcopy(snapshot), "reason": "invalid proposal",
+            "events": [{"op": "desktop_result", "action_id": action_id,
+                        "status": "blocked", "reason": "invalid proposal"}],
+        }
+    if action.action_id != action_id:
+        return {
+            "status": "blocked", "action_id": action_id,
+            "snapshot": copy.deepcopy(snapshot), "reason": "invalid proposal",
+            "events": [{"op": "desktop_result", "action_id": action_id,
+                        "status": "blocked", "reason": "invalid proposal"}],
+        }
+    events = emit_desktop_action_events(action, evidence=evidence)
+    card = {"status": "pending", "action_id": action.action_id,
+            "snapshot": copy.deepcopy(snapshot), "events": events}
     with _LOCK:
         _LATEST_CARD = copy.deepcopy(card)
     return card
@@ -259,30 +342,56 @@ def resolve_desktop_confirmation(msg: dict[str, Any]) -> dict[str, Any]:
     return {"status": "ok", "action_id": action_id, "action": resolved}
 
 
+def match_desktop_confirmation(text: str,
+                               card: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Map the card's typed phrase to an offline approval message.
+
+    The chat host intercepts this before the model sees it: the model must not
+    be able to answer its own confirmation prompt. A single pending card is
+    required; any other text falls through to the normal turn.
+    """
+    if card is None or card.get("status") != "pending":
+        return None
+    normalized = " ".join(str(text or "").casefold().split())
+    if normalized != CONFIRM_PHRASE.casefold():
+        return None
+    return {"action_id": card["action_id"], "approval": str(text),
+            "snapshot": copy.deepcopy(card["snapshot"])}
+
+
 def execute_desktop_confirmation(msg: dict[str, Any],
                                  control: DesktopControl) -> dict[str, Any]:
-    """Resolve and execute one confirmed action through the injected control.
+    """Execute one confirmed action through Task 5's full safety path.
 
-    Used by the orb websocket host. The action comes from the exact snapshot
-    settled by the typed approval; no input happens on a bad phrase, a stale
-    overlay, or a cancellation. Tests inject a fake control, so this never
-    moves a real cursor or types real keys.
+    The executor re-checks the stop latch *after* consuming the one-shot
+    approval, revalidates launch policy, and audits every outcome. The overlay
+    gate is checked here as well: an approval arriving after the heartbeat dies
+    must not reach the executor. Tests inject a fake control, so no test moves
+    a real cursor or types real keys.
     """
-    resolution = resolve_desktop_confirmation(msg)
-    if resolution["status"] != "ok":
-        return {k: v for k, v in resolution.items() if k != "action"}
-    action = resolution["action"]
-    try:
-        from jarvis.desktop.executor import _execute_action
+    action_id = str(msg.get("action_id") or "")
+    if not desktop_overlay_connected():
+        _cancel_executor_pending("overlay lost before execution")
+        return {"status": "blocked", "action_id": action_id,
+                "reason": "overlay unavailable"}
+    if is_cancelled():
+        return {"status": "cancelled", "action_id": action_id,
+                "reason": "stop requested"}
 
-        _execute_action(control, action)
-    except Exception as exc:
-        return {
-            "status": "failed",
-            "action_id": action.action_id,
-            "error": " ".join(str(exc).split()),
-        }
-    return {"status": "ok", "action_id": action.action_id, "kind": action.kind}
+    from jarvis.desktop.executor import DesktopActionExecutor
+
+    executor = DesktopActionExecutor(control)
+    result = executor.execute(
+        action_id,
+        str(msg.get("approval") or msg.get("phrase") or ""),
+        msg.get("snapshot") or {},
+    )
+    # One shared redaction policy for every UI/facts surface; the executor
+    # already redacts its audit copy, but its status payload must be safe too.
+    for key in ("reason", "error"):
+        if key in result:
+            result[key] = redact_sensitive(result[key])
+    return result
 
 
 __all__ = [
@@ -292,6 +401,11 @@ __all__ = [
     "mark_desktop_overlay",
     "desktop_overlay_connected",
     "desktop_heartbeat_status",
+    "is_shell_origin",
+    "clear_desktop_card",
+    "adopt_pending_desktop_proposal",
+    "match_desktop_confirmation",
+    "desktop_cursor_result_events",
     "reset_desktop_session",
     "latest_desktop_card",
     "stop_desktop_action",

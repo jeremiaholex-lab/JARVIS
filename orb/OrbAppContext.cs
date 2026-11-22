@@ -162,6 +162,7 @@ public sealed class OrbAppContext : ApplicationContext
             _window.FormClosed += OnWindowClosed;
         }
 
+        _window.CursorCommandReceived += (_, json) => OnDesktopCursorCommand(json);
         _window.Show();
         // Reclaim the mic: the HUD was just hidden, and this window may have
         // been parked earlier with capture disabled.
@@ -240,6 +241,7 @@ public sealed class OrbAppContext : ApplicationContext
         if (_overlay is null || _overlay.IsDisposed)
         {
             var overlay = new OverlayForm();
+            overlay.CursorCommandReceived += (_, json) => OnDesktopCursorCommand(json);
             overlay.HideRequested += () => SetHud(false);
             overlay.OpenFullRequested += () =>
             {

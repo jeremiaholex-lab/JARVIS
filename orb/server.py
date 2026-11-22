@@ -92,11 +92,16 @@ from jarvis.desktop.executor import cancel_pending_desktop_actions
 # import seam. The C# shell is a separate process; ops are emitted over /ws.
 from jarvis.desktop import overlay_protocol as _overlay
 from jarvis.desktop.overlay_protocol import (
+    adopt_pending_desktop_proposal,
+    clear_desktop_card,
     desktop_heartbeat_status,
     desktop_overlay_connected,
+    desktop_cursor_result_events,
     emit_desktop_action_events,
     execute_desktop_confirmation,
+    is_shell_origin,
     latest_desktop_card,
+    match_desktop_confirmation,
     mark_desktop_overlay,
     prepare_desktop_action,
     reset_desktop_session,
@@ -1631,6 +1636,21 @@ def build_app():
             # sequence drives the shell overlay.
             c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
 
+    async def adopt_desktop_proposal(c: Client, q, proposal: dict) -> None:
+        """Bridge a Task 1 proposal from the agent tools into the /ws card.
+
+        The proposal is already pending in the shared store; adoption only
+        builds the card and cursor marker. A dead shell overlay still blocks
+        the card, so invisible input can never be prepared.
+        """
+        card = adopt_pending_desktop_proposal(
+            proposal, evidence=proposal.get("crop_bytes", b""))
+        if card["status"] == "pending":
+            await emit_desktop_card(c, q)
+            return
+        for event in card["events"]:
+            c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
+
     async def settle_desktop_confirmation(c: Client, q, msg: dict) -> None:
         """Typed phrase + exact snapshot + live overlay, or nothing executes."""
         from jarvis.desktop.win32_control import DesktopControl
@@ -1640,11 +1660,17 @@ def build_app():
             c.desktop_control = DesktopControl()
         result = await asyncio.to_thread(
             execute_desktop_confirmation, msg, c.desktop_control)
-        c.emit(q, "desktop_result", **result)
+        action_id = str(msg.get("action_id") or result.get("action_id") or "")
+        detail = result.get("error") or result.get("reason") or "blocked"
+        for event in desktop_cursor_result_events(action_id, result["status"], detail):
+            c.emit(q, event["op"], **{k: v for k, v in event.items() if k != "op"})
         if result["status"] != "ok":
+            # Shared redaction policy plus textContent rendering in index.html:
+            # an OS fault must never echo a raw sensitive path on the card.
+            from jarvis.desktop.actions import redact_sensitive
+
             c.emit(q, "chat", role="system",
-                   text="Desktop action not done: " + str(
-                       result.get("error") or result.get("reason") or "blocked"),
+                   text="Desktop action not done: " + redact_sensitive(str(detail)),
                    engine="desktop")
         else:
             c.emit(q, "chat", role="system",
@@ -1662,6 +1688,7 @@ def build_app():
         cancel_pending_desktop_actions("new turn")
         from jarvis.desktop.executor import reset_cancel
         reset_cancel()
+        clear_desktop_card("new turn")
 
         ctx = agent_context()
         t0 = time.time()
@@ -2368,18 +2395,18 @@ def build_app():
                 continue
             op = msg.get("op")
             if op == "overlay_connected":
-                # The orb page announces itself when the WebView loads. The
-                # dedicated C# shell sends "shell_connected" + heartbeats and
-                # is the authority for fail-closed action gating.
+                # The orb page announces itself, but a page script cannot
+                # prove the native overlay exists. Record it for diagnostics
+                # only; the fail-closed latch stays untouched.
                 c.overlay_seen_at = time.time()
-                mark_desktop_overlay("connected")
                 c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
             elif op in ("shell_connected", "overlay_heartbeat"):
-                # The C# shell announces itself and then pings. A stale or
-                # missing heartbeat blocks every desktop action.
-                c.overlay_seen_at = time.time()
-                mark_desktop_overlay("connected" if op == "shell_connected"
-                                     else "heartbeat")
+                # Only the C# shell announces itself and pings, and only when
+                # it carries the native-origin marker. A stale or missing
+                # heartbeat blocks every desktop action.
+                if is_shell_origin(msg):
+                    c.overlay_seen_at = time.time()
+                    mark_desktop_overlay(op)
                 c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
             elif op == "desktop_hud_action":
                 # HUD Stop / Ctrl+Alt+J: settle the pending card and cursor.
@@ -2397,6 +2424,15 @@ def build_app():
             elif op == "chat":
                 text = msg.get("text", "").strip()
                 if not text:
+                    continue
+                # A desktop card's typed phrase is settled offline, before the
+                # model sees it: the model must not be able to approve its own
+                # proposal. The exact snapshot comes from the card latch, not
+                # from free text.
+                desktop_verdict = match_desktop_confirmation(
+                    text, latest_desktop_card())
+                if desktop_verdict is not None:
+                    await settle_desktop_confirmation(c, q, desktop_verdict)
                     continue
                 # A file-edit confirmation typed in the chat box is settled
                 # here, never handed to the model: a model must not be able to

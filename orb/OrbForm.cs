@@ -13,6 +13,8 @@ public sealed class OrbForm : Form
     private bool _micEnabled = true;
 
     public event EventHandler? StartupFailed;
+    /// <summary>Backend overlay op relayed by the page to the native shell.</summary>
+    public event EventHandler<string>? CursorCommandReceived;
 
     public OrbForm()
     {
@@ -86,13 +88,19 @@ public sealed class OrbForm : Form
         wv.NavigationCompleted += (_, _) =>
         {
             ApplyMicState();
-            PostToPage("{\"op\":\"shell_connected\"}");
+            PostToPage("{\"op\":\"shell_connected\",\"source\":\"shell\"}");
         };
         wv.WebMessageReceived += (_, ev) =>
         {
             // The main window relays HUD Stop to the backend as well.
             if (ev.WebMessageAsJson.Contains("stop-desktop", StringComparison.Ordinal))
                 PostToPage("{\"op\":\"desktop_hud_action\",\"reason\":\"hud stop\"}");
+            // Backend overlay ops are echoed by forwardOverlayOp(); route only
+            // those to the native cursor layer, never page-authored commands.
+            if (ev.WebMessageAsJson.Contains("desktop_cursor_", StringComparison.Ordinal)
+                || ev.WebMessageAsJson.Contains("desktop_confirm", StringComparison.Ordinal)
+                || ev.WebMessageAsJson.Contains("desktop_result", StringComparison.Ordinal))
+                CursorCommandReceived?.Invoke(this, ev.WebMessageAsJson);
         };
 
         try

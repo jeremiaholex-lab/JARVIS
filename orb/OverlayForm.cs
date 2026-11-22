@@ -39,6 +39,8 @@ public sealed class OverlayForm : Form
     private POINT _dragCursorStart;
 
     public event Action? HideRequested;
+    /// <summary>Backend overlay op relayed by the page to the native shell.</summary>
+    public event EventHandler<string>? CursorCommandReceived;
     public event Action? OpenFullRequested;
     private readonly System.Windows.Forms.Timer _heartbeat;
 
@@ -203,6 +205,7 @@ public sealed class OverlayForm : Form
         PostToPage(JsonSerializer.Serialize(new Dictionary<string, string?>
         {
             ["op"] = op,
+            ["source"] = "shell",  // page scripts cannot arm the overlay gate
             [extraKey ?? ""] = extraValue,
         }));
     }
@@ -225,9 +228,18 @@ public sealed class OverlayForm : Form
             using var doc = JsonDocument.Parse(e.WebMessageAsJson);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return;
-            if (!root.TryGetProperty("op", out var opEl)) return;
+            if (!root.TryGetProperty("op", out var opEl)
+                || opEl.ValueKind != JsonValueKind.String) return;
+            string op = opEl.GetString() ?? "";
 
-            switch (opEl.GetString())
+            // The page forwards backend overlay ops back to the native shell.
+            // Only the documented cursor ops may reach the cursor window;
+            // heartbeat/stop claims from a page must not drive the overlay.
+            if (op.StartsWith("desktop_cursor_", StringComparison.Ordinal)
+                || op == "desktop_confirm" || op == "desktop_result")
+                CursorCommandReceived?.Invoke(this, e.WebMessageAsJson);
+
+            switch (op)
             {
                 case "dragStart": BeginDrag(); break;
                 case "dragEnd": EndDrag(); break;

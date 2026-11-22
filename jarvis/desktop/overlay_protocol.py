@@ -99,7 +99,7 @@ def sign_native_heartbeat(op: str, nonce: str, token: str) -> str:
     """MAC for a native shell heartbeat sent over the local HTTP channel."""
     if not isinstance(token, str) or not token:
         return ""
-    if op not in _SHELL_EVENTS and op not in ("native_session", "heartbeat"):
+    if op not in (*_SHELL_EVENTS, "native_session", "heartbeat"):
         return ""
     if not isinstance(nonce, str) or not nonce:
         return ""
@@ -131,7 +131,7 @@ def is_shell_origin(msg: dict[str, Any]) -> bool:
         return False
     op = msg.get("op")
     supplied = msg.get("token")
-    return (op in _SHELL_EVENTS and isinstance(supplied, str)
+    return (op in (*_SHELL_EVENTS, "heartbeat") and isinstance(supplied, str)
             and hmac.compare_digest(supplied, _SHELL_TOKEN))
 
 

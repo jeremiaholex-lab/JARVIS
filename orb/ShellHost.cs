@@ -94,7 +94,11 @@ public static class ShellHost
         if (!PortOpen()) return false;
         var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
         var request = new HttpRequestMessage(HttpMethod.Post,
-            $"http://127.0.0.1:{Port}/api/native/session");
+            $"http://127.0.0.1:{Port}/api/native/session")
+        {
+            Content = new StringContent(
+                "{\"nonce\":\"" + nonce + "\"}", Encoding.UTF8, "application/json"),
+        };
         request.Headers.Add("x-jarvis-shell-token", token);
         request.Headers.Add("x-jarvis-shell-hmac",
             SignNativeMessage("native_session", nonce, token));
@@ -105,12 +109,7 @@ public static class ShellHost
         var root = doc.RootElement;
         return root.TryGetProperty("session_id", out var session)
             && session.ValueKind == JsonValueKind.String
-            && session.GetString()!.Length > 0
-            && root.TryGetProperty("nonce_sig", out var sig)
-            && sig.ValueKind == JsonValueKind.String
-            && CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(sig.GetString() ?? ""),
-                Encoding.UTF8.GetBytes(SignNativeMessage("native_session", nonce, token)));
+            && session.GetString()!.Length > 0;
     }
 
     public static (Process? backend, bool attached) Launch(bool appendLog = false)

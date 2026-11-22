@@ -986,6 +986,11 @@ def shell_token() -> str:
     return _overlay.native_shell_token()
 
 
+def native_session_id() -> str:
+    """Backend-owned channel id used by the native attach challenge."""
+    return _NATIVE_SESSION_ID
+
+
 def establish_native_channel() -> tuple[str, str, str]:
     """Bind a fresh channel to this backend session and publish it locally."""
     shell_token = secrets.token_hex(32)
@@ -1417,7 +1422,7 @@ def build_app():
             return JSONResponse({"models": [], "error": str(exc)})
 
     @app.post("/api/native/session")
-    def native_session(request: Request):
+    async def native_session(request: Request):
         """Validate a local channel against this live backend before attach.
 
         The response contains only a short-lived nonce, never a secret. The
@@ -1433,16 +1438,18 @@ def build_app():
         if not hmac.compare_digest(auth_token, _overlay.native_shell_token()):
             return JSONResponse({"error": "native channel authentication required"},
                                 status_code=401)
-        nonce = secrets.token_hex(16)
+        # The challenge nonce must come from the caller's signed request. A
+        # server-chosen nonce would let any matching header answer the challenge.
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "json body required"}, status_code=400)
+        nonce = str(body.get("nonce") or "") if isinstance(body, dict) else ""
         expected = sign_native_heartbeat("native_session", nonce, auth_token)
-        if not hmac.compare_digest(auth_mac, expected):
+        if not nonce or not hmac.compare_digest(auth_mac, expected):
             return JSONResponse({"error": "native channel authentication required"},
                                 status_code=401)
-        return JSONResponse({
-            "session_id": _NATIVE_SESSION_ID,
-            "nonce": nonce,
-            "nonce_sig": sign_native_heartbeat("native_session", nonce, auth_token),
-        })
+        return JSONResponse({"session_id": _NATIVE_SESSION_ID})
 
     @app.post("/api/native/heartbeat")
     async def native_heartbeat(request: Request):

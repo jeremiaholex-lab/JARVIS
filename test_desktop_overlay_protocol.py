@@ -624,6 +624,30 @@ def test_stale_native_channel_file_is_not_accepted_when_backend_restarts(
                                                     "a" * 64, "b" * 64)
 
 
+def test_native_session_challenge_uses_caller_nonce():
+    """A stale/unsigned caller must not borrow a server-generated nonce."""
+    from fastapi.testclient import TestClient
+
+    app = server.build_app()
+    with TestClient(app, client=("127.0.0.1", 12348)) as client:
+        nonce = "caller-generated-nonce"
+        response = client.post("/api/native/session", json={"nonce": nonce},
+                               headers={
+                                   "x-jarvis-shell-token": "test-shell-token",
+                                   "x-jarvis-shell-hmac": server.sign_native_heartbeat(
+                                       "native_session", nonce, "test-shell-token"),
+                               })
+        assert response.status_code == 200, response.text
+        assert response.json()["session_id"] == server.native_session_id()
+        assert "nonce" not in response.json()
+        assert "nonce_sig" not in response.json()
+
+        bad = client.post("/api/native/session", json={"nonce": nonce},
+                          headers={"x-jarvis-shell-token": "test-shell-token",
+                                   "x-jarvis-shell-hmac": "0" * 64})
+        assert bad.status_code == 401
+
+
 def test_attach_rejects_stale_channel_before_using_its_secrets(monkeypatch):
     from pathlib import Path
 

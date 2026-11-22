@@ -178,22 +178,21 @@ class Win32OSBoundary:
         if not self._user32.SetCursorPos(x, y):
             raise OSError(ctypes.get_last_error(), "SetCursorPos failed")
 
-    @classmethod
-    def _send(cls, *inputs: _INPUT) -> None:
+    def _send(self, *inputs: _INPUT) -> None:
         array = (_INPUT * len(inputs))(*inputs)
-        sent = cls._user32.SendInput(len(array), array, ctypes.sizeof(_INPUT))
+        sent = self._user32.SendInput(len(array), array, ctypes.sizeof(_INPUT))
         if sent != len(array):
             raise OSError(ctypes.get_last_error(), "SendInput partially failed")
 
-    @classmethod
-    def _mouse(cls, x: int, y: int, flags: int, data: int = 0) -> _INPUT:
+    @staticmethod
+    def _mouse(x: int, y: int, flags: int, data: int = 0) -> _INPUT:
         return _INPUT(
             type=_INPUT_MOUSE,
             mi=_MOUSEINPUT(x, y, data, flags, 0, None),
         )
 
-    @classmethod
-    def _key(cls, vk: int, scan: int, flags: int = 0) -> _INPUT:
+    @staticmethod
+    def _key(vk: int, scan: int, flags: int = 0) -> _INPUT:
         return _INPUT(
             type=_INPUT_KEYBOARD,
             ki=_KEYBDINPUT(vk, scan, flags, 0, None),
@@ -202,7 +201,7 @@ class Win32OSBoundary:
     def click(self, x: int, y: int, button: str, clicks: int) -> None:
         down = _MOUSEEVENTF_LEFTDOWN if button == "left" else _MOUSEEVENTF_RIGHTDOWN
         up = _MOUSEEVENTF_LEFTUP if button == "left" else _MOUSEEVENTF_RIGHTUP
-        events: list[_INPUT] = []
+        events: list[_INPUT] = [self._mouse(x, y, _MOUSEEVENTF_MOVE)]
         for _ in range(clicks):
             events.extend((
                 self._mouse(0, 0, down),
@@ -212,14 +211,19 @@ class Win32OSBoundary:
 
     def scroll(self, x: int, y: int, direction: str, amount: int) -> None:
         delta = _WHEEL_DELTA * amount * (1 if direction == "up" else -1)
-        self._send(self._mouse(0, 0, _MOUSEEVENTF_WHEEL, delta & 0xFFFFFFFF))
+        self._send(
+            self._mouse(x, y, _MOUSEEVENTF_MOVE),
+            self._mouse(0, 0, _MOUSEEVENTF_WHEEL, delta & 0xFFFFFFFF),
+        )
 
     def type_text(self, text: str) -> None:
         for char in text:
-            scan = self._user32.MapVirtualKeyW(ord(char), 0)
+            # With KEYEVENTF_UNICODE wVk must be zero and wScan is the UTF-16
+            # code unit itself, not a MapVirtualKeyW scan code.
+            unit = ord(char)
             self._send(
-                self._key(0, scan, _KEYEVENTF_UNICODE),
-                self._key(0, scan, _KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
+                self._key(0, unit, _KEYEVENTF_UNICODE),
+                self._key(0, unit, _KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
             )
 
     def press_keys(self, keys: list[str]) -> None:

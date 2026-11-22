@@ -10,7 +10,12 @@ from typing import Protocol, runtime_checkable
 
 import pytest
 
-from jarvis.desktop.win32_control import DesktopControl, Win32DesktopControl
+from jarvis.desktop import win32_control as module
+from jarvis.desktop.win32_control import (
+    DesktopControl,
+    Win32DesktopControl,
+    Win32OSBoundary,
+)
 
 
 class FakeDesktop:
@@ -177,3 +182,114 @@ def test_public_protocol_matches_downstream_contract():
         "press_keys", "focus_window", "window_rect",
     ):
         assert hasattr(DesktopControl, name)
+
+
+class _FakeDLL:
+    """Callable stub that accepts any function name and records invocations."""
+
+    def __init__(self, log, name):
+        self._log = log
+        self._name = name
+
+    def __getattr__(self, func_name):
+        def stub(*args, **kwargs):
+            self._log.append((self._name, func_name, args))
+            if func_name == "SendInput":
+                return len(args[1])
+            if func_name == "GetDC":
+                return 1
+            if func_name == "GetDeviceCaps":
+                return 96
+            return 1
+        return stub
+
+
+@pytest.fixture
+def mocked_dlls(monkeypatch):
+    """Construct the real boundary with fake DLLs; no OS input is possible."""
+    log = []
+
+    def fake_win_dll(name, **kwargs):
+        return _FakeDLL(log, name)
+
+    monkeypatch.setattr(module.ctypes, "WinDLL", fake_win_dll)
+    monkeypatch.setattr(module.ctypes, "get_last_error", lambda: 0)
+    return Win32OSBoundary(), log
+
+
+def _sent_events(log):
+    """Decode SendInput payloads captured by the fake DLL."""
+    events = []
+    for dll, name, args in log:
+        if dll != "user32" or name != "SendInput":
+            continue
+        count, array, _size = args
+        for index in range(count):
+            event = array[index]
+            if event.type == module._INPUT_MOUSE:
+                events.append((
+                    "mouse", event.mi.dx, event.mi.dy,
+                    event.mi.dwFlags, event.mi.mouseData,
+                ))
+            else:
+                events.append((
+                    "key", event.ki.wVk, event.ki.wScan, event.ki.dwFlags,
+                ))
+    return events
+
+
+def test_real_boundary_click_sends_approved_coordinates(mocked_dlls):
+    boundary, log = mocked_dlls
+    boundary.click(42, 99, "left", 2)
+    events = _sent_events(log)
+    assert events[0] == (
+        "mouse", 42, 99, module._MOUSEEVENTF_MOVE, 0
+    )
+    assert len(events) == 5  # one move + two down/up pairs
+    assert events[1][3] == module._MOUSEEVENTF_LEFTDOWN
+    assert events[-1][3] == module._MOUSEEVENTF_LEFTUP
+
+
+def test_real_boundary_scroll_sends_approved_coordinates(mocked_dlls):
+    boundary, log = mocked_dlls
+    boundary.scroll(7, 8, "down", 3)
+    events = _sent_events(log)
+    assert events[0] == ("mouse", 7, 8, module._MOUSEEVENTF_MOVE, 0)
+    assert events[-1] == (
+        "mouse", 0, 0, module._MOUSEEVENTF_WHEEL, (-3 * 120) & 0xFFFFFFFF
+    )
+
+
+def test_real_boundary_unicode_text_uses_code_units(mocked_dlls):
+    boundary, log = mocked_dlls
+    boundary.type_text("A")
+    assert _sent_events(log) == [
+        ("key", 0, ord("A"), module._KEYEVENTF_UNICODE),
+        ("key", 0, ord("A"), module._KEYEVENTF_UNICODE | module._KEYEVENTF_KEYUP),
+    ]
+    # Unicode input must not go through virtual-key-to-scan mapping.
+    assert not any(name == "MapVirtualKeyW" for _dll, name, _args in log)
+
+
+def test_real_boundary_key_chord_releases_in_reverse(mocked_dlls):
+    boundary, log = mocked_dlls
+    boundary.press_keys(["ctrl", "a"])
+    events = _sent_events(log)
+    assert [event[1] for event in events] == [
+        module._KEYCODES["ctrl"], module._KEYCODES["a"],
+        module._KEYCODES["a"], module._KEYCODES["ctrl"],
+    ]
+    assert [event[3] for event in events] == [0, 0, module._KEYEVENTF_KEYUP, module._KEYEVENTF_KEYUP]
+
+
+@pytest.mark.parametrize("method,args", (
+    ("click", (42, 99, "left", 2)),
+    ("scroll", (7, 8, "down", 3)),
+    ("type_text", ("A",)),
+    ("press_keys", (["ctrl", "a"],)),
+))
+def test_real_boundary_input_methods_do_not_raise(mocked_dlls, method, args):
+    """Regression: classmethod helpers used to lose the instance DLL."""
+    boundary, log = mocked_dlls
+    getattr(boundary, method)(*args)
+    assert any(name == "SendInput" for _dll, name, _args in log)

@@ -490,10 +490,14 @@ def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
                 "status": "rejected",
                 "note": "Nothing was done.",
             }, ensure_ascii=False)
-        proposal["crop_bytes"] = crop
         from jarvis.desktop.actions import _set_desktop_proposal_hook
 
-        _set_desktop_proposal_hook(proposal)
+        # Crop bytes belong only on the orb's local hook. Putting them in the
+        # returned JSON would send a screenshot to the model provider and burn
+        # context, contradicting the local-only guarantee.
+        hook_proposal = dict(proposal)
+        hook_proposal["crop_bytes"] = crop
+        _set_desktop_proposal_hook(hook_proposal)
     if password_warning:
         proposal["password_warning"] = True
         proposal["note"] += (

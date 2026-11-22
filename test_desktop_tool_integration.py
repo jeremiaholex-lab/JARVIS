@@ -87,13 +87,17 @@ class FakeContext:
 
 @pytest.fixture(autouse=True)
 def isolated_desktop_session(monkeypatch):
-    """Every test starts and ends with no card, pending action, or hook."""
+    """Every test starts and ends with no card, pending action, or hook.
+
+    The yielded fake is the exact object injected into the proposal path, so
+    ``fake.calls`` assertions cannot silently observe a different instance.
+    """
     reset_cancel()
     overlay_protocol.reset_desktop_session("integration test setup")
     clear_desktop_proposal_hook()
-    # No test may reach a real screen or construct a real Win32 boundary.
-    monkeypatch.setattr(agent_tools, "_desktop_capture_control", lambda: FakeDesktop())
-    yield
+    control = FakeDesktop()
+    monkeypatch.setattr(agent_tools, "_desktop_capture_control", lambda: control)
+    yield control
     overlay_protocol.reset_desktop_session("integration test teardown")
     clear_desktop_proposal_hook()
     reset_cancel()
@@ -159,8 +163,8 @@ def test_desktop_tools_are_destructive_non_read(name):
 
 
 @pytest.mark.parametrize("name", DESKTOP_TOOLS)
-def test_desktop_tool_proposes_only_and_does_no_os_input(name, fake_screen):
-    fake = FakeDesktop()
+def test_desktop_tool_proposes_only_and_does_no_os_input(name, isolated_desktop_session, fake_screen):
+    fake = isolated_desktop_session
     payload = _propose(name)
     assert payload["status"] == "pending"
     assert payload["kind"]
@@ -192,9 +196,9 @@ def _is_crop_call(call):
     return call[0] == "window_rect"
 
 
-def test_desktop_click_tool_proposes_only(fake_screen):
+def test_desktop_click_tool_proposes_only(isolated_desktop_session, fake_screen):
     """The brief's representative case, pinned against a fake boundary."""
-    fake = FakeDesktop()
+    fake = isolated_desktop_session
     result = _propose("desktop_click", {"x": 10, "y": 20})
     assert result["status"] == "pending"
     assert result["kind"] == "click"
@@ -203,7 +207,7 @@ def test_desktop_click_tool_proposes_only(fake_screen):
 
 
 @pytest.mark.parametrize("kind", ["move_cursor", "click", "scroll"])
-def test_coordinate_actions_attach_local_crop_bytes(kind, fake_screen):
+def test_coordinate_actions_keep_crop_off_the_tool_result(kind, fake_screen):
     arguments = {
         "move_cursor": {"x": 100, "y": 200},
         "click": {"x": 100, "y": 200, "button": "left", "clicks": 1},
@@ -211,13 +215,14 @@ def test_coordinate_actions_attach_local_crop_bytes(kind, fake_screen):
     }[kind]
     payload = _propose(f"desktop_{kind}", arguments)
     assert payload["status"] == "pending"
-    encoded = payload["crop_bytes"]
+    # The model-visible result must not carry screenshot bytes or context cost.
+    assert "crop_bytes" not in payload
+    hook = consume_desktop_proposal()
+    encoded = hook["crop_bytes"]
     assert isinstance(encoded, str)
     png = base64.b64decode(encoded, validate=True)
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
     assert struct.unpack(">II", png[16:24]) == (260, 320)  # radius 160, clipped
-    hook = consume_desktop_proposal()
-    assert hook["crop_bytes"] == encoded
     # The crop is local evidence only; the approved snapshot stays exact.
     assert payload["snapshot"]["target"]["x"] == 100
     assert payload["snapshot"]["target"]["y"] == 200

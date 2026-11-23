@@ -372,6 +372,58 @@ def test_unknown_name_fails_closed_without_a_card():
     assert consume_desktop_proposal() is None
 
 
+def test_unknown_name_suggests_installed_apps(monkeypatch):
+    """A miss names what is installed, so one round trip corrects it."""
+    monkeypatch.setattr(app_launch, "DEFAULT_APP_ALIASES", {})
+    payload = json.loads(agent_tools.execute(
+        build_tools(), "desktop_open_app", {"name_or_path": "chrme"}))
+    assert payload.get("status") == "rejected"
+    assert "Google Chrome" in payload["candidates"]
+    assert consume_desktop_proposal() is None
+
+
+def test_settings_alias_overrides_the_default(monkeypatch):
+    """settings.json 'app_aliases' merges over the built-in defaults."""
+    monkeypatch.setattr(
+        agent_tools, "_app_aliases_from_settings",
+        lambda: {"surf the web": "google chrome"})
+    payload = _propose("desktop_open_app", {"name_or_path": "surf the web"})
+    assert payload["status"] == "pending"
+    assert payload["target"]["name_or_path"] == \
+        "C:/ProgramData/Start Menu/Programs/Google Chrome.lnk"
+
+
+def test_settings_alias_failure_keeps_defaults(monkeypatch):
+    """An unreadable settings file must not break app opening."""
+    import jarvis.agent.brain as brain
+
+    def _boom():
+        raise RuntimeError("settings unavailable")
+    monkeypatch.setattr(brain, "load_settings", _boom)
+    payload = _propose("desktop_open_app", {"name_or_path": "notepad"})
+    assert payload["status"] == "pending"
+    assert payload["target"]["name_or_path"] == \
+        "C:/ProgramData/Start Menu/Programs/Notepad.lnk"
+
+
+def test_alias_helper_merges_over_defaults(monkeypatch):
+    """One settings entry adds a mapping without shadowing the rest."""
+    import jarvis.agent.brain as brain
+
+    monkeypatch.setattr(brain, "load_settings",
+                        lambda: {"app_aliases": {"browse": "mozilla firefox"}})
+    merged = agent_tools._app_aliases_from_settings()
+    assert merged["browse"] == "mozilla firefox"
+    assert merged["code"] == "visual studio code"  # default still present
+
+
+def test_alias_helper_ignores_non_dict_settings(monkeypatch):
+    import jarvis.agent.brain as brain
+
+    monkeypatch.setattr(brain, "load_settings", lambda: {"app_aliases": "nope"})
+    assert agent_tools._app_aliases_from_settings() is None
+
+
 def test_path_like_input_passes_through_to_the_launch_policy():
     """Files and paths skip resolution and keep the exact user-supplied path."""
     payload = _propose("desktop_open_app", {"name_or_path": "C:/Docs/report.pdf"})

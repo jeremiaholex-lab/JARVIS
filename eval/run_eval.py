@@ -148,6 +148,18 @@ def run_case(case: dict) -> None:
         got = looks_like_recollection(utterance)
         if got != spec["expect"]:
             raise AssertionError(f"looks_like_recollection -> {got}, wanted {spec['expect']}")
+    elif kind == "app":
+        from jarvis.desktop.app_launch import prepare_open_app
+        from jarvis.desktop.app_resolver import AppEntry
+        index = [AppEntry(name, path) for name, path in spec.get("index", [])]
+        got = prepare_open_app(utterance, index=index, aliases=spec.get("aliases"))
+        expect = spec["expect"]
+        if got.get("ok") != expect.get("ok"):
+            raise AssertionError(f"prepare_open_app -> {got!r}, wanted ok={expect.get('ok')}")
+        if expect.get("name") and got.get("name") != expect["name"]:
+            raise AssertionError(f"resolved name {got.get('name')!r}, wanted {expect['name']!r}")
+        if "candidates" in expect and got.get("candidates") != expect["candidates"]:
+            raise AssertionError(f"candidates {got.get('candidates')!r}, wanted {expect['candidates']!r}")
     elif kind == "switch":
         from jarvis.agent.providers import parse_model_switch
         got = parse_model_switch(utterance)

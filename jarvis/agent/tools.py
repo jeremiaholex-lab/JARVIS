@@ -528,6 +528,28 @@ def _propose_desktop_launch(kind: str, target: dict, evidence: Optional[dict] = 
     return _propose_desktop_action(kind, target, evidence or {})
 
 
+def _app_aliases_from_settings() -> Optional[dict]:
+    """User alias overrides from settings.json ("app_aliases": {...}).
+
+    Merged over the built-in defaults so one entry adds or replaces a single
+    mapping without shadowing the rest. An unreadable value means "defaults
+    only" — a broken settings file must never break app opening.
+    """
+    from jarvis.desktop.app_launch import DEFAULT_APP_ALIASES
+
+    try:
+        from jarvis.agent.brain import load_settings
+
+        extra = load_settings().get("app_aliases")
+    except Exception:
+        return None
+    if not isinstance(extra, dict):
+        return None
+    merged = dict(DEFAULT_APP_ALIASES)
+    merged.update({str(k): str(v) for k, v in extra.items() if str(v).strip()})
+    return merged
+
+
 def _desktop_open_app(name_or_path: str) -> str:
     """Resolve a spoken app name to a Start-menu shortcut before proposing.
 
@@ -537,9 +559,9 @@ def _desktop_open_app(name_or_path: str) -> str:
     re-resolves. Ambiguous or unknown names fail closed: an error payload with
     candidates, and no card the operator could approve by mistake.
     """
-    from jarvis.desktop.app_launch import prepare_open_app
+    from jarvis.desktop.app_launch import DEFAULT_APP_ALIASES, prepare_open_app
 
-    prepared = prepare_open_app(name_or_path)
+    prepared = prepare_open_app(name_or_path, aliases=_app_aliases_from_settings())
     if not prepared.get("ok"):
         return json.dumps({
             "error": prepared.get("error") or "No app could be resolved.",

@@ -341,3 +341,53 @@ CASES += [
     {"id": "keep-question-is-not-a-fact", "cat": "keep", "check": ("keep",
         "what is my elevator code? do not lose it", {"expect": ""})},
 ]
+
+# --------------------------------------------------------------- app launching
+# Pinned behaviors of spoken app names against a fake Start menu: exact and
+# alias resolution, ambiguity failing closed with candidates, typo tolerance,
+# and path-like inputs passing through to the launch policy. Offline and
+# deterministic — the index is supplied by the case, never scanned from the OS.
+_CASES_APP = [
+    {"id": "app-exact-name", "cat": "app", "check": ("app", "spotify",
+        {"index": [["Spotify", "C:/Menu/Spotify.lnk"]], "aliases": {}, "expect": {"ok": True, "name": "Spotify"}})},
+    {"id": "app-alias-browser", "cat": "app", "check": ("app", "browser",
+        {"index": [["Google Chrome", "C:/Menu/Chrome.lnk"]],
+         "expect": {"ok": True, "name": "Google Chrome"}})},
+    {"id": "app-alias-code", "cat": "app", "check": ("app", "code",
+        {"index": [["Visual Studio Code", "C:/Menu/VS Code.lnk"]],
+         "expect": {"ok": True, "name": "Visual Studio Code"}})},
+    {"id": "app-alias-settles-ambiguity", "cat": "app", "check": ("app", "chrome",
+        {"index": [["Google Chrome", "C:/Menu/Chrome.lnk"],
+                   ["Chrome Remote Desktop", "C:/Menu/CRD.lnk"]],
+         "expect": {"ok": True, "name": "Google Chrome"}},
+        "the default alias settles the two-Chrome case; no guess, no card")},
+    {"id": "app-ambiguous-no-alias", "cat": "app", "check": ("app", "chrome",
+        {"index": [["Google Chrome", "C:/Menu/Chrome.lnk"],
+                   ["Chrome Remote Desktop", "C:/Menu/CRD.lnk"]],
+         "aliases": {},
+         "expect": {"ok": False, "candidates": ["Chrome Remote Desktop", "Google Chrome"]}},
+        "without an alias, two matches fail closed with candidates")},
+    {"id": "app-typo-tolerant", "cat": "app", "check": ("app", "spotfy",
+        {"index": [["Spotify", "C:/Menu/Spotify.lnk"], ["Notepad", "C:/Menu/Notepad.lnk"]],
+         "aliases": {}, "expect": {"ok": True, "name": "Spotify"}},
+        "a one-letter typo still finds the app")},
+    {"id": "app-unknown-suggests", "cat": "app", "check": ("app", "chrome edge browser",
+        {"index": [["Google Chrome", "C:/Menu/Chrome.lnk"], ["Notepad", "C:/Menu/Notepad.lnk"]],
+         "aliases": {}, "expect": {"ok": False, "candidates": ["Google Chrome"]}},
+        "a miss names what IS installed so one round trip corrects it")},
+    {"id": "app-unknown-gibberish-no-suggestion", "cat": "app", "check": ("app", "zzqqxx",
+        {"index": [["Spotify", "C:/Menu/Spotify.lnk"], ["Notepad", "C:/Menu/Notepad.lnk"]],
+         "aliases": {}, "expect": {"ok": False, "candidates": []}},
+        "gibberish invents no near-match suggestion")},
+    {"id": "app-path-passes-through", "cat": "app", "check": ("app", "C:/Docs/report.pdf",
+        {"index": [["Spotify", "C:/Menu/Spotify.lnk"]],
+         "expect": {"ok": True}},
+        "path-like input skips resolution; the launch policy judges it")},
+    {"id": "app-exe-passes-through", "cat": "app", "check": ("app", "notepad.exe",
+        {"index": [["Spotify", "C:/Menu/Spotify.lnk"]],
+         "expect": {"ok": True}},
+        "an .exe name is not resolved; the launch policy blocks it")},
+]
+
+CASES += _CASES_APP
+

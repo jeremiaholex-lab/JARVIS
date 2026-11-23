@@ -1428,6 +1428,13 @@
       const v = st.voice;
       $("modVoice").textContent = v.backend === "gemini" ? "GEMINI" : "KOKORO";
       $("voiceNote").textContent = "voice: last reply spoken with " + (v.backend === "gemini" ? "Gemini TTS" : "local Kokoro");
+      // The pressure websocket event only fires on state CHANGE, so a client
+      // that connects during a long "ok" stretch would show "--" forever.
+      // Seed the gauge from the status snapshot; pushes keep it fresh.
+      if (st.pressure && st.pressure.available_gb != null) {
+        $("vMem").textContent = Number(st.pressure.available_gb).toFixed(1) + " GB";
+        $("bMem").style.width = Math.min(100, Math.round((Number(st.pressure.available_gb) / 16) * 100)) + "%";
+      }
     }).catch(() => {});
     fetch("/api/model").then(r => r.json()).then(d => {
       if (!d.tiers) return;

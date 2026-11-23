@@ -1,8 +1,18 @@
 # JARVIS
 
-JARVIS is a local-first, voice-first personal AI assistant. It combines a persistent conversational agent, real tool use, a visual desktop orb, removable background work, and a visible security model. The default brain runs locally through Ollama; cloud escalation is optional and explicitly configured.
+**A local-first, voice-first personal AI assistant that can actually use your computer — and asks before it touches anything.**
+
+JARVIS pairs a persistent conversational agent with real tool use, a visual desktop orb, durable background work, and a security model you can see. The default brain runs locally through Ollama; cloud escalation is optional and explicitly configured. Every action that changes your machine — writing a file, editing code, launching an app, moving the mouse — stops at a confirmation gate and waits for you.
 
 The orb is the instrument surface: its color and motion show whether JARVIS is listening, thinking, speaking, or muted. The same browser page powers a full desktop window and a floating heads-up display (HUD), sharing one microphone owner and one agent backend.
+
+| | |
+| --- | --- |
+| **Tools** | 38 available to the agent — files, documents, web, screen, browser, laptop facts, and 7 gated desktop actions |
+| **Verification** | 880 tests passing, 5 skipped · 115/115 offline behavioral cases |
+| **Default brain** | Local Ollama (`qwen3:1.7b`), with an optional Gemini → Lite → Agnes cloud ladder |
+| **Voice** | Wake word → VAD → local Whisper transcription → hybrid hosted/local TTS |
+| **Platform** | Windows 11 · Python 3.12+ · .NET WebView2 |
 
 ## What JARVIS can do
 
@@ -13,6 +23,7 @@ The orb is the instrument surface: its color and motion show whether JARVIS is l
 - Listen through wake-word detection, voice activity detection, and local transcription; speak through hybrid hosted CrowLLM/Gemini TTS with local Kokoro fallback.
 - Propose writes and file edits through confirmation gates. Nothing is written until the operator confirms.
 - Propose seven desktop actions (open app/file, move cursor, click, scroll, type, press keys) behind typed confirmation. Tool calls never perform OS input by themselves.
+- Understand spoken app names — "open chrome", "launch code", "open my notes" resolve against your Start menu before a confirmation card is ever created.
 - Answer read-only laptop questions about battery, network, and open applications.
 - Expose traces, security tiers, skill state, and a hash-chained audit trail in the interface.
 - Run a behavioral eval suite offline to check routing, tool use, memory, and safety decisions.
@@ -32,9 +43,35 @@ Confirmation rules:
 - Safe launch policy: documents, folders, common applications, and `.lnk` shortcuts are allowed. `.exe` (except common applications under Program Files), scripts, URLs/URI schemes, network paths, and alternate streams are rejected before a confirmation card exists and are revalidated immediately before execution.
 - Entering text that looks like a password or secret shows a prominent warning on the card, but explicit typed approval still allows it.
 
+### Spoken app names
+
+`desktop_open_app` accepts the way people actually talk. Saying "open chrome" or "launch my notes" resolves to a real Start-menu shortcut **before** the confirmation card exists, so what you approve is exactly what launches.
+
+Resolution runs in a fixed order, against a Start-menu index cached for ten minutes:
+
+1. **Exact name** — a case-insensitive match on an installed shortcut.
+2. **Alias** — a short spoken name mapped to its installed name (`chrome` → Google Chrome, `code` → Visual Studio Code, `notes` → Notepad).
+3. **Fuzzy match** — a close spelling wins only if it clears a similarity cutoff and beats the runner-up by a clear margin, so `chrme` still finds Chrome but a genuinely ambiguous name does not guess.
+
+An ambiguous or unknown name **fails closed**: no card is created, nothing is queued, and the reply lists the closest installed apps as suggestions ("Did you mean: Google Chrome?"). Suggestions are names only, never paths, so an error message can never smuggle a launchable target. Anything that looks like a path (`C:\...`, a `.lnk`, a UNC path) bypasses name resolution entirely and goes straight to the launch policy above.
+
+Because resolution happens once, at proposal time, the executor runs the approved payload unchanged — there is no second lookup between approval and launch that could quietly change the target.
+
+Add your own aliases under `app_aliases` in `orb/settings.json`; they merge over the defaults:
+
+```json
+{
+  "app_aliases": {
+    "browser": "firefox",
+    "terminal": "windows terminal"
+  }
+}
+```
+
 Example prompts:
 
 - "What is my battery status and what apps are open?" — read-only answer; no desktop action card.
+- "Open chrome." — resolves to the Google Chrome shortcut, then a pending card; nothing opens until you type `yes, do it`.
 - "Open Notepad for me." — a pending card; nothing opens until you type `yes, do it`.
 - "Click the OK button at 640, 480 and tell me when it is done." — one card with a local crop; no input before approval.
 - "Type `hello` at 300, 200." — one card; exact text is part of the snapshot.
@@ -55,7 +92,7 @@ Browser orb / HUD  --WebSocket-->  Python orb server
                           /      |       \
                    routing    tools    memory
                       |          |         |
-               local/cloud   26 tools   SQLite + vectors
+               local/cloud   38 tools   SQLite + vectors
                                  |
                         task runner / schedules
                                  |
@@ -70,10 +107,12 @@ Browser orb / HUD  --WebSocket-->  Python orb server
 | --- | --- | --- |
 | Agent turn loop | `jarvis/agent/turn.py` | Routes the request, offers tool schemas, executes tool calls, feeds results back to the model, and retries when a model skips required tool use. |
 | Tool registry | `jarvis/agent/registry.py` | Validates tool names, schemas, implementations, and security tiers. Extensions can register read-only tools only. |
+| Plugin tools | `jarvis/plugins/` | Read-only laptop facts: battery, network, open apps, and system overview. Sensitive windows are filtered out before anything reaches the model. |
 | Background work | `jarvis/agent/task_runner.py`, `schedules.py`, `file_watchers.py`, `planner.py` | Runs durable tasks, cron schedules, watched-folder jobs, and decomposed plans. |
 | Memory and learning | `jarvis/agent/memory.py`, `semantic.py`, `user_model.py` | Stores episodes, vectors, and explicit user preferences. |
 | Model providers | `jarvis/agent/providers.py`, `brain.py`, `routing.py` | Talks to Ollama and cloud APIs, manages preferences, and chooses a model per turn. |
 | Security | `jarvis/security/` | Classifies actions, audits them, prompts for confirmation, and enforces typed approval for destructive edits. |
+| Desktop control | `jarvis/desktop/` | The confirmed-action contract, launch policy, card evidence, app-name resolution, the Win32 input boundary, and the executor that revalidates before running. |
 | Speech | `jarvis/speech.py`, `jarvis_voice_loop.py` | Shapes spoken text and drives the local wake/speech loop. |
 | Orb backend | `orb/server.py` | FastAPI server, WebSocket pipeline, REST readback, settings, TTS streaming, and task endpoints. |
 | Orb front end | `orb/static/index.html` | Single-file orb UI, transcript, composer, settings drawer, trace panel, and audio queue. |
@@ -190,7 +229,7 @@ Ask for a delayed task, a repeating schedule, or a folder watcher in plain langu
 
 ## Configuration
 
-Runtime settings live in `orb/settings.json`, including local model, cloud endpoint, tier policies, voice, wake threshold, voice activity detection tail, follow-up timing, barge-in sensitivity, speech rate, context size, and vision consent. Cloud keys are read from the environment or local secret files and must never be committed.
+Runtime settings live in `orb/settings.json`, including local model, cloud endpoint, tier policies, voice, wake threshold, voice activity detection tail, follow-up timing, barge-in sensitivity, speech rate, context size, vision consent, and `app_aliases` for spoken app names. Cloud keys are read from the environment or local secret files and must never be committed.
 
 `jarvis-phase3.toml` and `jarvis-phase4.toml` are older phase configuration examples. Treat `orb/settings.json` as the live orb configuration.
 
@@ -226,7 +265,7 @@ Run the live eval only while the orb is running:
 python eval/run_eval.py --live
 ```
 
-Latest recorded results in this repository's working history: 634 first-party tests passed, 6 skipped; 105/105 offline behavioral cases passed. CI checks are not configured yet, so these are local verification results.
+Latest recorded results on `master`: **880 first-party tests passed, 5 skipped**; **115/115 offline behavioral cases passed**. CI checks are not configured yet, so these are local verification results.
 
 ## Troubleshooting
 
@@ -244,6 +283,8 @@ Latest recorded results in this repository's working history: 634 first-party te
 
 ```text
 jarvis/               Python agent, tools, security, memory, speech, skills
+jarvis/desktop/       Confirmed desktop actions, launch policy, app resolution
+jarvis/plugins/       Read-only laptop-facts tools
 orb/                  FastAPI backend, browser UI, C# WebView2 shell
 eval/                 Behavioral eval cases and runner
 docs/superpowers/     Design specs and implementation plans
@@ -251,6 +292,31 @@ openjarvis_runtime/   Pinned OpenJarvis Git submodule
 test_*.py             First-party pytest modules
 tests/                Additional first-party pytest modules
 ```
+
+## Releases
+
+Releases are tagged on `master` and published on the [Releases page](https://github.com/jeremiaholex-lab/JARVIS/releases). Each release lists what shipped, the verification results at that point, and any upgrade notes.
+
+| Version | Focus |
+| --- | --- |
+| [v0.1.0](https://github.com/jeremiaholex-lab/JARVIS/releases/tag/v0.1.0) | First tagged release: voice-first agent, gated desktop control with spoken app names, durable tasks, orb UI and HUD |
+
+This project follows a simple convention: a tag marks a state of `master` where the full test suite and the offline eval both pass. There is no separate release branch.
+
+## Contributors
+
+JARVIS is built and maintained by **[jeremiaholex-lab](https://github.com/jeremiaholex-lab)** — product direction, design, and the operating decisions behind the security model.
+
+Implementation is pair-programmed with Claude (Anthropic) through [Claude Code](https://claude.com/claude-code). Commits carry a `Co-Authored-By` trailer naming the model that worked on them, so the history records both the human decision and the assistant that helped carry it out.
+
+Contributions are welcome. Before opening a pull request:
+
+1. Run `python -m pytest` — the full suite must pass.
+2. Run `python eval/run_eval.py` — the offline behavioral cases must pass.
+3. Keep new tools honest about their tier: extensions may register **read-only** tools only, and anything that changes the machine belongs behind a confirmation gate.
+4. Never commit secrets, model weights, local databases, or `.env` files.
+
+See [PRODUCT.md](PRODUCT.md) for the product commitments a change should respect, and [DESIGN.md](DESIGN.md) for the interface principles.
 
 ## Further reading
 

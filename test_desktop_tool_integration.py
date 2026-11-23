@@ -17,14 +17,26 @@ import pytest
 
 from jarvis.agent import tools as agent_tools
 from jarvis.agent.tools import build_tools
+from jarvis.desktop import app_launch
 from jarvis.desktop import evidence as evidence_module
 from jarvis.desktop import overlay_protocol
 from jarvis.desktop.actions import (
     clear_desktop_proposal_hook,
     consume_desktop_proposal,
 )
+from jarvis.desktop.app_resolver import AppEntry
 from jarvis.desktop.executor import DesktopActionExecutor, reset_cancel
 from jarvis.security.tiers import PlannedAction, Tier, classify
+
+# Process-local fake Start menu: resolution must never scan the real one.
+FAKE_START_MENU = [
+    AppEntry("Notepad", "C:/ProgramData/Start Menu/Programs/Notepad.lnk"),
+    AppEntry("Spotify", "C:/ProgramData/Start Menu/Programs/Spotify.lnk"),
+    AppEntry("Google Chrome", "C:/ProgramData/Start Menu/Programs/Google Chrome.lnk"),
+    AppEntry("Chrome Remote Desktop", "C:/ProgramData/Start Menu/Programs/Chrome Remote Desktop.lnk"),
+    AppEntry("Visual Studio Code", "C:/ProgramData/Start Menu/Programs/Visual Studio Code.lnk"),
+    AppEntry("Chrome Incognito", "C:/ProgramData/Start Menu/Programs/Chrome Incognito.lnk"),
+]
 
 DESKTOP_TOOLS = (
     "desktop_open_app",
@@ -37,7 +49,7 @@ DESKTOP_TOOLS = (
 )
 
 VALID_CALLS = {
-    "desktop_open_app": {"name_or_path": "Notepad"},
+    "desktop_open_app": {"name_or_path": "notepad"},
     "desktop_open_file": {"path": "C:/Users/Public/Documents/notes.txt"},
     "desktop_move_cursor": {"x": 10, "y": 20},
     "desktop_click": {"x": 10, "y": 20},
@@ -95,6 +107,12 @@ def isolated_desktop_session(monkeypatch):
     reset_cancel()
     overlay_protocol.reset_desktop_session("integration test setup")
     clear_desktop_proposal_hook()
+    # App-name resolution stays process-local: a fake Start-menu index and a
+    # cold cache, so no test ever scans the real Start menu.
+    app_launch._index_cache = None
+    app_launch._index_at = 0.0
+    monkeypatch.setattr(
+        app_launch, "cached_start_menu_index", lambda: list(FAKE_START_MENU))
     control = FakeDesktop()
     monkeypatch.setattr(agent_tools, "_desktop_capture_control", lambda: control)
     yield control
@@ -283,14 +301,98 @@ def test_sensitive_named_document_keeps_exact_target_and_redacted_preview():
 
 
 def test_sensitive_window_title_is_redacted_in_card_evidence():
-    """A sensitive window title can be a target string, but never card copy."""
+    """A sensitive app name can resolve, but never reaches card copy."""
     payload = _propose(
         "desktop_open_app", {"name_or_path": "Chrome Incognito"})
     assert payload["status"] == "pending"
+    # Resolution rewrote the target to the shortcut path; the display name
+    # lands in evidence and is redacted there, along with the preview.
+    assert payload["target"]["name_or_path"] == \
+        "C:/ProgramData/Start Menu/Programs/Chrome Incognito.lnk"
     assert "Incognito" not in json.dumps(payload["evidence"])
     assert payload["evidence"]["target_preview"] == "[REDACTED]"
-    # The exact user-supplied string stays in the executable snapshot.
-    assert payload["target"]["name_or_path"] == "Chrome Incognito"
+    assert payload["snapshot"]["target"]["name_or_path"] == \
+        payload["target"]["name_or_path"]
+
+
+def test_spoken_name_resolves_to_shortcut_before_the_card(isolated_desktop_session):
+    """The approved payload is the exact .lnk path the card displays."""
+    fake = isolated_desktop_session
+    payload = _propose("desktop_open_app", {"name_or_path": "notepad"})
+    assert payload["status"] == "pending"
+    assert payload["target"]["name_or_path"] == \
+        "C:/ProgramData/Start Menu/Programs/Notepad.lnk"
+    assert payload["evidence"]["resolved_app"] == "Notepad"
+    assert payload["snapshot"]["target"]["name_or_path"] == \
+        payload["target"]["name_or_path"]
+    # The spoken name itself never launches: approval runs the resolved path.
+    executor = DesktopActionExecutor(fake)
+    approved = executor.execute(
+        payload["action_id"], "yes, do it", payload["snapshot"])
+    assert approved["status"] == "ok"
+    assert ("open", "C:/ProgramData/Start Menu/Programs/Notepad.lnk") in fake.calls
+
+
+def test_alias_resolves_at_proposal_time():
+    payload = _propose("desktop_open_app", {"name_or_path": "code"})
+    assert payload["status"] == "pending"
+    assert payload["target"]["name_or_path"] == \
+        "C:/ProgramData/Start Menu/Programs/Visual Studio Code.lnk"
+    assert payload["evidence"]["resolved_app"] == "Visual Studio Code"
+
+
+def test_alias_chrome_resolves_at_the_tool_level():
+    """The default alias maps 'chrome' to Google Chrome: one card, no guess."""
+    payload = _propose("desktop_open_app", {"name_or_path": "chrome"})
+    assert payload["status"] == "pending"
+    assert payload["target"]["name_or_path"] == \
+        "C:/ProgramData/Start Menu/Programs/Google Chrome.lnk"
+    assert payload["evidence"]["resolved_app"] == "Google Chrome"
+
+
+def test_ambiguous_name_fails_closed_with_candidates(monkeypatch):
+    """Without an alias to settle it, two matches mean no card at all."""
+    monkeypatch.setattr(app_launch, "DEFAULT_APP_ALIASES", {})
+    payload = json.loads(agent_tools.execute(
+        build_tools(), "desktop_open_app", {"name_or_path": "chrome"}))
+    assert payload.get("status") == "rejected"
+    assert "error" in payload
+    assert "Google Chrome" in payload["candidates"]
+    assert "Chrome Remote Desktop" in payload["candidates"]
+    assert "action_id" not in payload
+    assert consume_desktop_proposal() is None
+
+
+def test_unknown_name_fails_closed_without_a_card():
+    payload = json.loads(agent_tools.execute(
+        build_tools(), "desktop_open_app", {"name_or_path": "zzqqxx"}))
+    assert payload.get("status") == "rejected"
+    assert "error" in payload
+    assert payload["candidates"] == []
+    assert consume_desktop_proposal() is None
+
+
+def test_path_like_input_passes_through_to_the_launch_policy():
+    """Files and paths skip resolution and keep the exact user-supplied path."""
+    payload = _propose("desktop_open_app", {"name_or_path": "C:/Docs/report.pdf"})
+    assert payload["status"] == "pending"
+    assert payload["target"]["name_or_path"] == "C:/Docs/report.pdf"
+    assert "resolved_app" not in payload["evidence"]
+
+
+def test_resolution_never_scans_the_real_start_menu(monkeypatch):
+    """The resolver consults only the fixture's fake index, never the OS."""
+    def _boom(*args, **kwargs):
+        raise AssertionError("the real Start menu was scanned")
+    monkeypatch.setattr(app_launch, "scan_shortcuts", _boom)
+    monkeypatch.setattr(app_launch, "start_menu_dirs", _boom)
+    monkeypatch.setattr(
+        app_launch, "cached_start_menu_index", lambda: list(FAKE_START_MENU))
+    app_launch._index_cache = None
+    app_launch._index_at = 0.0
+    payload = _propose("desktop_open_app", {"name_or_path": "spotify"})
+    assert payload["status"] == "pending"
+    assert payload["target"]["name_or_path"].endswith("Spotify.lnk")
 
 
 def test_password_field_warns_but_remains_approvable():

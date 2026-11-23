@@ -507,7 +507,7 @@ def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
     return json.dumps(proposal, ensure_ascii=False)
 
 
-def _propose_desktop_launch(kind: str, target: dict) -> str:
+def _propose_desktop_launch(kind: str, target: dict, evidence: Optional[dict] = None) -> str:
     """Reject unsafe launch targets *before* a proposal or card exists.
 
     Task 4 owns the policy; Task 5 revalidates it immediately before execution.
@@ -525,11 +525,34 @@ def _propose_desktop_launch(kind: str, target: dict) -> str:
             "status": "rejected",
             "note": "No confirmation card was created and nothing was opened.",
         }, ensure_ascii=False)
-    return _propose_desktop_action(kind, target, {})
+    return _propose_desktop_action(kind, target, evidence or {})
 
 
 def _desktop_open_app(name_or_path: str) -> str:
-    return _propose_desktop_launch("open_app", {"name_or_path": name_or_path})
+    """Resolve a spoken app name to a Start-menu shortcut before proposing.
+
+    Resolution happens here, at proposal time, so the confirmation card shows
+    the matched shortcut and the approved payload is the exact path the card
+    displays. The executor runs the approved payload unchanged — it never
+    re-resolves. Ambiguous or unknown names fail closed: an error payload with
+    candidates, and no card the operator could approve by mistake.
+    """
+    from jarvis.desktop.app_launch import prepare_open_app
+
+    prepared = prepare_open_app(name_or_path)
+    if not prepared.get("ok"):
+        return json.dumps({
+            "error": prepared.get("error") or "No app could be resolved.",
+            "status": "rejected",
+            "candidates": prepared.get("candidates", []),
+            "note": "No confirmation card was created and nothing was opened.",
+        }, ensure_ascii=False)
+    target = {"name_or_path": name_or_path}
+    evidence: dict = {}
+    if prepared.get("path"):
+        target = {"name_or_path": prepared["path"]}
+        evidence["resolved_app"] = prepared.get("name") or ""
+    return _propose_desktop_launch("open_app", target, evidence)
 
 
 def _desktop_open_file(path: str) -> str:
@@ -1224,9 +1247,12 @@ def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[Agent
     # whose functions only propose a confirmed action. No OS input occurs here.
     _DESKTOP_SCHEMAS: Dict[str, tuple[str, Callable[..., str], Dict[str, Any]]] = {
         "desktop_open_app": (
-            "Propose opening a common application, document, folder, or .lnk shortcut. "
-            "Executables, scripts and URLs are not supported in v1. NOTHING is opened "
-            "until the user types the confirmation phrase.",
+            "Propose opening a common application by name, or one document, "
+            "folder, or .lnk shortcut by path. Spoken names resolve against the "
+            "Start menu ('spotify' finds Spotify); ambiguous or unknown names "
+            "fail with suggestions. Executables, scripts and URLs are not "
+            "supported in v1. NOTHING is opened until the user types the "
+            "confirmation phrase.",
             _desktop_open_app,
             {"type": "object", "properties": {"name_or_path": {"type": "string"}},
              "required": ["name_or_path"]},

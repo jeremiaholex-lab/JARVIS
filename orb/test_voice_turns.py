@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -242,6 +243,21 @@ def wait_for_op(ws, op: str, **want):
             return m
 
 
+def wait_until(predicate, timeout: float = 5.0) -> bool:
+    """Poll a server-side condition the websocket does not report as a message.
+
+    Audio frames sent here are processed on the server's event loop; an
+    immediate assert after a send races that loop under load, so every
+    server-side counter in these tests is polled, never assumed.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
 def test_playback_done_opens_the_followup_window(ws_env):
     c, _env = ws_env
     with c.websocket_connect("/ws") as ws:
@@ -278,13 +294,16 @@ def test_barge_in_requires_sustained_audio_and_reopens_listening(ws_env):
         loud = np.full(320, 5000, dtype=np.int16)
 
         ws.send_json({"op": "audio", "data": base64.b64encode(quiet.tobytes()).decode()})
+        assert wait_until(lambda: client.audio_chunks >= 1)
         assert client.playback_active is True
         assert client.barge_frames == 0
 
         for _ in range(39):
             ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
+        # 39 < the 40-frame threshold: counting must saturate below the cut.
+        # The server counts asynchronously, so poll for all 39 to land.
+        assert wait_until(lambda: client.barge_frames == 39)
         assert client.playback_active is True
-        assert client.barge_frames == 39
 
         ws.send_json({"op": "audio", "data": base64.b64encode(loud.tobytes()).decode()})
         # Confirmation is a background transcription, not a synchronous cut:

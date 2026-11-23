@@ -79,6 +79,45 @@ SAMPLE_RATE = 16000
 # Sentence-shaping lives in jarvis.speech so the morning briefing (which has no
 # web server in front of it) speaks with the same rules the orb does.
 from jarvis.speech import split_sentences as _split_sentences, speech_text as _speech_text
+# Read-only laptop facts are exposed to the orb for local readback. The
+# reference is imported by name so tests (and operators) can patch one seam.
+from jarvis.plugins import system_facts
+# A new user turn is a desktop stop source: cancel every pending action card
+# (and arm the executor stop latch) so the previous request's card cannot
+# execute mid-turn. The Task 1 store, its audit trail, and the latch settle
+# in one call.
+from jarvis.desktop.executor import cancel_pending_desktop_actions
+# Task 6: the overlay protocol is the only path from a card to OS input. It
+# re-exports heartbeat and event helpers here so the orb and tests share one
+# import seam. The C# shell is a separate process; ops are emitted over /ws.
+from jarvis.desktop import overlay_protocol as _overlay
+from jarvis.desktop.actions import (
+    clear_desktop_proposal_hook,
+    consume_desktop_proposal,
+    sign_native_relay,
+    verify_native_relay,
+)
+from jarvis.desktop.overlay_protocol import (
+    adopt_pending_desktop_proposal,
+    arm_native_shell_channel,
+    clear_desktop_card,
+    desktop_heartbeat_status,
+    desktop_overlay_connected,
+    desktop_cursor_result_events,
+    emit_desktop_action_events,
+    execute_desktop_confirmation,
+    is_shell_origin,
+    latest_desktop_card,
+    match_desktop_confirmation,
+    mark_desktop_overlay,
+    mark_native_shell_heartbeat,
+    native_shell_token,
+    prepare_desktop_action,
+    reset_desktop_session,
+    resolve_desktop_confirmation,
+    sign_native_heartbeat,
+    stop_desktop_action,
+)
 # The confirmation grammar is defined once, in file_edit, so the orb and the
 # Telegram host cannot drift. See EDIT_CONFIRM_RE there.
 from jarvis.security.file_edit import (
@@ -733,6 +772,7 @@ class AgentContext:
         configure_writes(self.writes)
         self.file_edits = self._build_file_edits()
         configure_file_edits(self.file_edits)
+        self._build_desktop_audit()
         db = governance_home() / "memory.db"
         self.memory = Memory(db)
         self.user_model = UserModel(db)
@@ -799,6 +839,22 @@ class AgentContext:
     def _vision_context(self):
         """What the look_at_screen tool needs: engines plus current settings."""
         return self.local, self.cloud_engine(), SETTINGS
+
+    def _build_desktop_audit(self):
+        """Desktop transitions share the confirm gate's hash-chained trail.
+
+        Without this injection jarvis.desktop.actions._audit() returns
+        silently, so every proposal/approval/denial/execution/failure/
+        cancellation would be unaudited in production.
+        """
+        from jarvis.desktop.actions import configure_desktop_audit
+        try:
+            from openjarvis.security.audit import AuditLogger
+            audit = AuditLogger(db_path=audit_db())
+        except Exception:
+            audit = None
+        configure_desktop_audit(audit)
+        return audit
 
     def _build_writes(self):
         """Deterministic-only secured write executor over the local project
@@ -904,6 +960,173 @@ def agent_context():
     return AGENT
 
 
+# The managed native shell passes per-session secrets in its child environment.
+# Each backend process owns the channel; a shell attaching to port 8010 must
+# validate it against that live backend before using the file's values. HTML/JS
+# cannot read the file, the environment, or the native heartbeat HTTP headers.
+_CHANNEL_FILE = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenJarvis" / "orb-desktop-channel.json"
+_NATIVE_SESSION_ID = secrets.token_hex(16)
+
+
+def _port_available() -> bool:
+    """True only when this process can own the backend port.
+
+    An attaching instance must not publish a channel: doing so would overwrite
+    the live backend's file with secrets no shell can validate against it.
+    """
+    import socket as _socket
+
+    try:
+        with _socket.socket() as probe:
+            probe.bind(("127.0.0.1", PORT))
+        return True
+    except OSError:
+        return False
+
+
+_ATTACH_MODE = not _port_available()
+# Channel secrets live only in overlay_protocol, which also owns the heartbeat
+# latch. Duplicating them here allowed test/app state to diverge and let stale
+# tokens appear valid to one side of the boundary.
+
+
+def _persist_native_channel(session_id: str, shell_token: str,
+                            relay_secret: str) -> None:
+    """Write the local-only channel file; never log or echo its values."""
+    try:
+        _CHANNEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CHANNEL_FILE.write_text(json.dumps({
+            "session_id": session_id,
+            "shell_token": shell_token,
+            "relay_secret": relay_secret,
+        }), encoding="utf-8")
+    except OSError:
+        # The in-memory pair still works for this process. An attached shell
+        # will fail closed if it cannot validate the channel, which is safe.
+        pass
+
+
+def verify_native_channel_session(session_id: str, shell_token: str,
+                                  relay_secret: str) -> bool:
+    """True only for this backend process's live channel identity."""
+    if not (session_id and shell_token and relay_secret):
+        return False
+    session_ok = hmac.compare_digest(str(session_id), _NATIVE_SESSION_ID)
+    token_ok = hmac.compare_digest(str(shell_token), _overlay.native_shell_token())
+    relay_ok = hmac.compare_digest(str(relay_secret), _overlay.native_relay_secret())
+    return session_ok and token_ok and relay_ok
+
+
+def shell_token() -> str:
+    """Secret shared only with the native shell, never sent to the page."""
+    return _overlay.native_shell_token()
+
+
+def native_session_id() -> str:
+    """Backend-owned channel id used by the native attach challenge."""
+    return _NATIVE_SESSION_ID
+
+
+def establish_native_channel() -> tuple[str, str, str]:
+    """Bind a fresh channel to this backend session and publish it locally."""
+    shell_token = secrets.token_hex(32)
+    relay_secret = secrets.token_hex(32)
+    _persist_native_channel(_NATIVE_SESSION_ID, shell_token, relay_secret)
+    arm_native_shell_channel(shell_token, relay_secret)
+    return _NATIVE_SESSION_ID, relay_secret, shell_token
+
+
+def _load_native_channel() -> tuple[str, str]:
+    env_shell = os.environ.get("JARVIS_SHELL_TOKEN") or ""
+    env_relay = os.environ.get("JARVIS_RELAY_SECRET") or ""
+    if env_shell and env_relay:
+        _persist_native_channel(_NATIVE_SESSION_ID, env_shell, env_relay)
+        return env_shell, env_relay
+    if bool(env_shell) != bool(env_relay):
+        # Partial secrets are not a usable channel; fail closed.
+        return "", ""
+    # Never trust a well-shaped file from an older backend: it may still be on
+    # disk after the process that owned it died. This backend always publishes
+    # its own live session before any shell may attach.
+    return "", ""
+
+
+if _ATTACH_MODE:
+    # Preserve the running backend's channel file and secrets; this process
+    # will return from main() without serving any requests.
+    _shell_from_env, _relay_from_env = "", ""
+elif _port_available():
+    _shell_from_env, _relay_from_env = _load_native_channel()
+    if _shell_from_env and _relay_from_env:
+        arm_native_shell_channel(_shell_from_env, _relay_from_env)
+    else:
+        establish_native_channel()
+else:
+    # Port changed hands during import: fail closed without touching the file.
+    _shell_from_env, _relay_from_env = "", ""
+
+
+def relay_secret() -> str:
+    """Secret shared only with the native shell, never sent to the page."""
+    return _overlay.native_relay_secret()
+
+
+def set_pending_desktop_proposal(proposal: dict) -> None:
+    """Mirror the Task 1 proposal hook for tests and non-orb hosts."""
+    from jarvis.desktop.actions import _set_desktop_proposal_hook
+
+    _set_desktop_proposal_hook(proposal)
+
+
+async def emit_pending_desktop_proposal(c: Client, q) -> None:
+    """Consume the Task 1 proposal hook written by a real tool call."""
+    proposal = consume_desktop_proposal()
+    if proposal is None:
+        return
+    # The agent tools return create_desktop_action_proposal() as JSON text;
+    # other Task 1 callers pass the dict. Accept both without inventing one.
+    if isinstance(proposal, str):
+        try:
+            proposal = json.loads(proposal)
+        except (TypeError, ValueError):
+            return
+    if not isinstance(proposal, dict):
+        return
+    # The hook was populated by create_desktop_action_proposal; do not
+    # register a competing proposal here.
+    await adopt_desktop_proposal(c, q, proposal, owner_id=c.client_id)
+
+
+async def adopt_desktop_proposal(c: Client, q, proposal: dict,
+                                 owner_id: str = "") -> None:
+    """Bridge a Task 1 proposal from the agent tools into the /ws card.
+
+    The proposal is already pending in the shared store; adoption only builds
+    the card and cursor marker. A dead shell overlay still blocks the card, so
+    invisible input can never be prepared. The card is owned by the client that
+    requested the turn; a different connection cannot approve it.
+    """
+    card = adopt_pending_desktop_proposal(
+        proposal, evidence=proposal.get("crop_bytes", b""),
+        owner_id=str(owner_id or ""))
+    if card["status"] != "pending":
+        return
+    for event in card["events"]:
+        # Sign once at the backend boundary. The page receives events over /ws
+        # and echoes them to the native shell; the shell verifies this MAC.
+        emit_signed(c, q, event["op"],
+                    **{k: v for k, v in event.items() if k != "op"})
+
+
+def emit_signed(c: Client, q, op: str, **kw) -> None:
+    """Emit a backend-origin op that the native shell may relay."""
+    if op.startswith("desktop_"):
+        event = {"op": op, **kw}
+        kw = {k: v for k, v in event.items() if k != "op"}
+        kw["relay_sig"] = sign_native_relay(event, relay_secret())
+    c.emit(q, op, **kw)
+
+
 class Client:
     """One orb window connection and its audio-accumulation state."""
 
@@ -947,6 +1170,9 @@ class Client:
         # reload or reconnect does not erase what JARVIS was just told.
         self.memory = memory
         self.history: list[dict] = []
+        # Task 6: heartbeat timestamp from the C# shell and injected control.
+        self.overlay_seen_at = 0.0
+        self.desktop_control = None
         if memory is not None:
             try:
                 self.history = [
@@ -1239,6 +1465,63 @@ def build_app():
         except Exception as exc:
             return JSONResponse({"models": [], "error": str(exc)})
 
+    @app.post("/api/native/session")
+    async def native_session(request: Request):
+        """Validate a local channel against this live backend before attach.
+
+        The response contains only a short-lived nonce, never a secret. The
+        native shell signs the nonce to prove it owns the file's token.
+        """
+        if request.client is None or request.client.host not in {"127.0.0.1", "::1", "localhost"}:
+            return JSONResponse({"error": "loopback client required"}, status_code=403)
+        auth_token = request.headers.get("x-jarvis-shell-token", "")
+        auth_mac = request.headers.get("x-jarvis-shell-hmac", "")
+        if not (auth_token and auth_mac):
+            return JSONResponse({"error": "native channel authentication required"},
+                                status_code=401)
+        if not hmac.compare_digest(auth_token, _overlay.native_shell_token()):
+            return JSONResponse({"error": "native channel authentication required"},
+                                status_code=401)
+        # The challenge nonce must come from the caller's signed request. A
+        # server-chosen nonce would let any matching header answer the challenge.
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "json body required"}, status_code=400)
+        nonce = str(body.get("nonce") or "") if isinstance(body, dict) else ""
+        expected = sign_native_heartbeat("native_session", nonce, auth_token)
+        if not nonce or not hmac.compare_digest(auth_mac, expected):
+            return JSONResponse({"error": "native channel authentication required"},
+                                status_code=401)
+        return JSONResponse({"session_id": _NATIVE_SESSION_ID})
+
+    @app.post("/api/native/heartbeat")
+    async def native_heartbeat(request: Request):
+        """Authenticated native heartbeat; never routed through the page."""
+        if request.client is None or request.client.host not in {"127.0.0.1", "::1", "localhost"}:
+            return JSONResponse({"error": "loopback client required"}, status_code=403)
+        shell_token = _overlay.native_shell_token()
+        supplied_token = request.headers.get("x-jarvis-shell-token", "")
+        supplied_mac = request.headers.get("x-jarvis-shell-hmac", "")
+        if not (shell_token and supplied_token and supplied_mac):
+            return JSONResponse({"error": "native heartbeat authentication required"},
+                                status_code=401)
+        if not hmac.compare_digest(supplied_token, shell_token):
+            return JSONResponse({"error": "native heartbeat authentication required"},
+                                status_code=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "json body required"}, status_code=400)
+        op = str(body.get("op") or "")
+        nonce = str(body.get("nonce") or "")
+        expected = sign_native_heartbeat(op, nonce, supplied_token)
+        if not expected or not hmac.compare_digest(supplied_mac, expected):
+            return JSONResponse({"error": "native heartbeat authentication required"},
+                                status_code=401)
+        mark_native_shell_heartbeat(op, supplied_token)
+        return JSONResponse(desktop_heartbeat_status())
+
     @app.get("/api/status")
     def status():
         return JSONResponse({
@@ -1308,6 +1591,11 @@ def build_app():
         read-tier tools it may call, and persistent memory stats."""
         try:
             ctx = agent_context()
+            try:
+                laptop_facts = system_facts.laptop_overview()
+            except Exception as exc:
+                laptop_facts = {"available": False,
+                                "reason": f"{exc.__class__.__name__}: {exc}"}
             return JSONResponse({
                 "tools": [t.name for t in ctx.tools],
                 "cloud_available": ctx.cloud_available,
@@ -1318,6 +1606,7 @@ def build_app():
                 "facts": [{"key": f.key, "value": f.value} for f in ctx.user_model.active_facts(6)],
                 "memory": ctx.memory.stats(),
                 "models": {"local": SETTINGS["local_model"], "cloud": SETTINGS["cloud"]["model"]},
+                "laptop_facts": laptop_facts,
             })
         except Exception as exc:
             return JSONResponse({"error": str(exc), "tools": [], "memory": {}}, status_code=200)
@@ -1588,9 +1877,70 @@ def build_app():
         text = " ".join(s.text.strip() for s in segs).strip()
         return text, time.time() - t0
 
+    async def emit_desktop_card(c: Client, q) -> None:
+        """Adopt this turn's real proposal, then emit the card and cursor ops."""
+        await emit_pending_desktop_proposal(c, q)
+        card = latest_desktop_card()
+        if card is None:
+            return
+        for event in card["events"]:
+            # Only the confirmation card is user-visible; the rest of the
+            # sequence drives the shell overlay. MAC every op so the page
+            # cannot synthesize a cursor command in the native relay.
+            emit_signed(c, q, event["op"],
+                        **{k: v for k, v in event.items() if k != "op"})
+
+    async def settle_desktop_confirmation(c: Client, q, msg: dict) -> None:
+        """Typed phrase + exact snapshot + live overlay, or nothing executes."""
+        from jarvis.desktop.win32_control import DesktopControl
+
+        # A /ws desktop_confirm op has no client_id field of its own. Bind it
+        # to the connection that received it so a second window cannot approve
+        # a card owned by the first window's turn.
+        card = latest_desktop_card()
+        owner = str((card or {}).get("owner_id") or "")
+        if owner and not hmac.compare_digest(owner, str(c.client_id)):
+            return
+        if (card is not None
+                and str(msg.get("action_id") or "") != str(card.get("action_id") or "")):
+            return
+
+        if c.desktop_control is None:
+            # Constructed lazily on the orb host only; tests inject fakes.
+            c.desktop_control = DesktopControl()
+        result = await asyncio.to_thread(
+            execute_desktop_confirmation, msg, c.desktop_control)
+        action_id = str(msg.get("action_id") or result.get("action_id") or "")
+        detail = result.get("error") or result.get("reason") or "blocked"
+        for event in desktop_cursor_result_events(action_id, result["status"], detail):
+            emit_signed(c, q, event["op"],
+                        **{k: v for k, v in event.items() if k != "op"})
+        if result["status"] != "ok":
+            # Shared redaction policy plus textContent rendering in index.html:
+            # an OS fault must never echo a raw sensitive path on the card.
+            from jarvis.desktop.actions import redact_sensitive
+
+            c.emit(q, "chat", role="system",
+                   text="Desktop action not done: " + redact_sensitive(str(detail)),
+                   engine="desktop")
+        else:
+            c.emit(q, "chat", role="system",
+                   text="Desktop action completed.", engine="desktop")
+
     async def do_turn(c: Client, q, text: str, trace: list[dict], force_cloud: bool) -> None:
         """One agent turn: route -> read-tier tools -> answer -> speak."""
         from jarvis.agent.turn import run_turn
+
+        # A new user turn is a desktop stop source: the previous request's
+        # pending action card must not execute — cancel it through the Task 1
+        # store (audit trail included) and arm the executor stop latch. The
+        # stop applies to the *previous* request, so clear the latch for this
+        # new one: a HUD stop must not freeze every future turn.
+        cancel_pending_desktop_actions("new turn")
+        from jarvis.desktop.executor import reset_cancel
+        reset_cancel()
+        clear_desktop_card("new turn")
+        clear_desktop_proposal_hook()
 
         ctx = agent_context()
         t0 = time.time()
@@ -1697,6 +2047,10 @@ def build_app():
         # diff and requires the typed phrase. Nothing is on disk until then.
         for pe in ctx.pending_edits():
             c.emit(q, "edit_confirm", **pe)
+        # Desktop proposals are queued by the agent tools. One card per request;
+        # the exact snapshot travels with it and nothing executes until typed
+        # approval returns through /ws with a live overlay heartbeat.
+        await emit_desktop_card(c, q)
         # Learning is deferred until the browser finishes speaking. Running it
         # here competes for CPU and network while speech is being generated.
         c.pending_learning = text
@@ -2292,7 +2646,24 @@ def build_app():
             except Exception:
                 continue
             op = msg.get("op")
-            if op == "audio":
+            if op == "overlay_connected":
+                # The orb page announces itself, but a page script cannot
+                # prove the native overlay exists. Record it for diagnostics
+                # only; the fail-closed latch stays untouched.
+                c.overlay_seen_at = time.time()
+                c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
+            elif op in ("shell_connected", "overlay_heartbeat"):
+                # Retired: the page can forge these ops and must not arm the
+                # gate. Native shell heartbeats use /api/native/heartbeat.
+                c.emit(q, "overlay_ack", status=desktop_heartbeat_status()["status"])
+            elif op == "desktop_hud_action":
+                # HUD Stop / Ctrl+Alt+J: settle the pending card and cursor.
+                for event in stop_desktop_action(str(msg.get("reason") or "hud stop")):
+                    emit_signed(c, q, event["op"],
+                                **{k: v for k, v in event.items() if k != "op"})
+            elif op == "desktop_confirm":
+                await settle_desktop_confirmation(c, q, msg)
+            elif op == "audio":
                 await handle_audio_chunk(base64.b64decode(msg.get("data", "")))
             elif op == "start":
                 await start_listening("record-button")
@@ -2302,6 +2673,15 @@ def build_app():
             elif op == "chat":
                 text = msg.get("text", "").strip()
                 if not text:
+                    continue
+                # A desktop card's typed phrase is settled offline, before the
+                # model sees it: the model must not be able to approve its own
+                # proposal. The exact snapshot comes from the card latch, not
+                # from free text.
+                desktop_verdict = match_desktop_confirmation(
+                    text, latest_desktop_card(), client_id=c.client_id)
+                if desktop_verdict is not None:
+                    await settle_desktop_confirmation(c, q, desktop_verdict)
                     continue
                 # A file-edit confirmation typed in the chat box is settled
                 # here, never handed to the model: a model must not be able to
@@ -2464,9 +2844,8 @@ def main() -> None:
     # idle) instead of dying silently. This is what the shell's "attach" mode
     # relies on.
     try:
-        s = _socket.socket()
-        s.bind(("127.0.0.1", PORT))
-        s.close()
+        with _socket.socket() as s:
+            s.bind(("127.0.0.1", PORT))
     except OSError:
         import urllib.request
 

@@ -276,6 +276,12 @@
   }
   .msg.write-confirm .wc-actions button[data-act="yes"] { border-color: var(--cy); color: var(--cy); }
   .msg.write-confirm .wc-done { font-family: var(--mono); font-size: 11px; color: var(--ok); }
+  .msg.desktop-confirm .dc-crop img { max-width: 100%; max-height: 180px; border: 1px solid var(--edge-2); border-radius: 6px; display: block; margin: 6px 0; }
+  .msg.desktop-confirm .wc-detail { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 10px; color: var(--mut); margin: 6px 0 0; }
+  .msg.desktop-confirm .dc-warning { color: var(--gold); font-size: 11px; margin-top: 6px; }
+  .msg.desktop-confirm .wc-actions button[data-act="stop"] { border-color: var(--bad); color: var(--bad); }
+  .tier-status .dot.desktop { background: var(--cy); box-shadow: 0 0 8px var(--cy); }
+  .tier-status .dot.desktop.off { background: var(--mut); box-shadow: none; }
   .msg.edit-confirm .body { border-color: rgba(255,79,216,0.45); }
   .msg.edit-confirm .badge.bad { color: var(--pink); border-color: var(--pink); }
   .msg.edit-confirm .wc-diff { margin: 8px 0 0; padding: 8px; max-height: 200px; overflow: auto; background: rgba(2,4,10,0.8); border: 1px solid var(--edge); border-radius: 8px; font-family: var(--mono); font-size: 11px; color: var(--tx); white-space: pre; }
@@ -442,6 +448,9 @@
   <span id="hudgrip" title="Drag to move"></span>
   <span id="hudstate">STANDBY</span>
   <div class="hudbtns">
+    <button id="hudStop" title="Stop desktop action (Ctrl+Alt+J)" aria-label="Stop desktop action">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+    </button>
     <button id="hudMute" title="Mute the agent" aria-label="Mute">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10v4h4l5 4V6l-5 4H4z"/><path d="M16.5 9.5 21 14M21 9.5 16.5 14"/></svg>
     </button>
@@ -481,6 +490,10 @@
         <div class="stat">
           <div class="row"><span>Memory free</span><b id="vMem">--</b></div>
           <div class="track"><i class="warm" id="bMem"></i></div>
+        </div>
+        <div class="stat">
+          <div class="row"><span>Laptop</span><b id="vFacts">--</b></div>
+          <div class="hint" id="vFactsDetail">Reading local telemetry…</div>
         </div>
         <div class="stat spark-wrap">
           <div class="row"><span>Voice signal</span><b id="vMic">0.00</b></div>
@@ -612,6 +625,7 @@
     <div class="setrow"><label>Screen reading</label>
       <label class="check"><input type="checkbox" id="sVisionConsent"> allow screenshots to go to the cloud vision model</label></div>
     <div class="tier-status" id="tierStatus"><span class="dot" id="tierDot"></span><span id="tierStatusText">tier policy: —</span></div>
+    <div class="tier-status"><span class="dot desktop off" id="overlayDot"></span><span id="overlayState">CURSOR OFFLINE</span></div>
     <div id="keynote" class="hint">Tiers gate the console secured-ask gate (phase4.py); the orb conversation can only call read-tier tools.</div>
     <div id="savetools">
       <button id="btnSave">Save settings</button>
@@ -682,6 +696,11 @@
   /* =========================== WS =========================== */
   const WS_URL = "ws://" + location.hostname + ":8010/ws";
   let ws, reconnectMs = 1500, micChunkCount = 0, micSampleCount = 0;
+  const OVERLAY_OPS = new Set([
+    "desktop_confirm", "desktop_cursor_show", "desktop_cursor_move",
+    "desktop_cursor_state", "desktop_cursor_hide", "desktop_hud_action",
+    "desktop_result"
+  ]);
   function wsSend(op, extra) { ws && ws.readyState === 1 && ws.send(JSON.stringify({ op, ...extra })); }
   function connect() {
     ws = new WebSocket(WS_URL);
@@ -690,6 +709,7 @@
       $("conn").textContent = "LINK ACTIVE";
       $("connLed").className = "led on";
       $("sysNote").textContent = "Connected to local JARVIS backend.";
+      wsSend("overlay_connected", { source: HUD_MODE ? "hud" : "orb" });
       if (!HUD_MODE) loadP4();
     };
     ws.onclose = () => {
@@ -953,6 +973,15 @@
     if (text) hudNote.timer = setTimeout(() => el.classList.remove("show"), ms || 6000);
   }
   window.jarvisHud = {
+    // C# shell bridge: it calls this with {op: ...} to send a heartbeat or a
+    // HUD stop through the same /ws connection as the page.
+    bridge(msg) {
+      if (!msg || typeof msg.op !== "string") return true;
+      // Heartbeats are native-only. A page script can call wsSend directly, so
+      // the backend validates an out-of-band token instead of this field.
+      wsSend(msg.op, msg);
+      return true;
+    },
     setMicEnabled(on) {
       on = !!on;
       if (on === micEnabled) { if (on) startMic().catch(() => {}); return; }
@@ -993,6 +1022,14 @@
       case "edit_confirm": renderEditConfirm(m); break;
       case "edit_resolved": resolveEditCard(m.token, m.approved, m.outcome); break;
       case "edit_undone": markEditUndone(m.token, m.outcome); break;
+      case "desktop_confirm": renderDesktopConfirm(m); forwardOverlayOp(m); break;
+      case "desktop_result": resolveDesktopCard(m); forwardOverlayOp(m); break;
+      case "desktop_cursor_show":
+      case "desktop_cursor_move":
+      case "desktop_cursor_state":
+      case "desktop_cursor_hide":
+      case "desktop_hud_action": forwardOverlayOp(m); break;
+      case "overlay_ack": updateOverlayState(m.status); break;
       case "trace": renderTrace(m.trace); break;
       case "tts_start": beginTTS(m.id, m.backend); break;
       case "tts_flush": flushSentence(m.index, m.ms); break;
@@ -1125,6 +1162,78 @@
   function markEditUndone(token, outcome) {
     const btns = document.querySelector("#erc_" + token + " .wc-actions");
     if (btns) btns.innerHTML = '<span class="wc-done">' + (outcome && outcome.error ? "Undo failed." : "Reverted.") + '</span>';
+  }
+
+  /* ======================= DESKTOP OVERLAY CARD ======================= */
+  // The C# shell listens on a postMessage bridge so the WebView page cannot
+  // spoof backend events; only signed ops the backend emitted are forwarded.
+  // Native heartbeats are authenticated by the native shell over loopback HTTP.
+  function forwardOverlayOp(m) {
+    if (!OVERLAY_OPS.has(m.op)) return;
+    if (typeof m.relay_sig !== "string") return;
+    try { window.chrome && window.chrome.webview &&
+      window.chrome.webview.postMessage(JSON.stringify(m)); } catch (e) {}
+  }
+  function updateOverlayState(status) {
+    const el = $("overlayState"); if (!el) return;
+    el.textContent = status === "ok" ? "CURSOR READY" : "CURSOR " + (status || "OFFLINE").toUpperCase();
+    el.classList.toggle("off", status !== "ok");
+    const dot = $("overlayDot"); if (dot) dot.classList.toggle("off", status !== "ok");
+  }
+  function renderDesktopConfirm(m) {
+    const chat = $("chat"); if (!chat || $("dac_" + m.action_id)) return;
+    const display = m.display || {};
+    const card = document.createElement("div");
+    card.className = "msg write-confirm desktop-confirm"; card.id = "dac_" + m.action_id;
+    card.innerHTML =
+      '<div class="who">Desktop action <span class="badge bad">' +
+        (m.risk || "write") + '</span></div>' +
+      '<div class="body"><div class="wc-line">Nothing has been done. Type <code>yes, do it</code> in chat to allow this single action.</div>' +
+      '<div class="dc-crop"></div>' +
+      '<div class="wc-what"></div><pre class="wc-detail"></pre>' +
+      '<div class="wc-typed"></div>' +
+      '<div class="wc-actions"><button data-act="stop">Stop</button></div></div>';
+    const crop = card.querySelector(".dc-crop");
+    if (m.crop && m.crop.startsWith("data:image/png;base64,")) {
+      const img = document.createElement("img");
+      img.alt = "Local crop of the target area";
+      img.src = m.crop; crop.appendChild(img);
+    }
+    // Only safe preview text from evidence reaches the card. The execution
+    // target stays in m.snapshot and is never rendered here.
+    const parts = [];
+    for (const k of ["target_preview", "description", "text_preview", "keys_preview"]) {
+      if (display[k]) parts.push(k.replace(/_preview$/, "") + ": " + display[k]);
+    }
+    card.querySelector(".wc-what").textContent = parts.join(" · ") || "One desktop action";
+    card.querySelector(".wc-detail").textContent =
+      "kind: " + (m.kind || "") + " · " + (m.expires_at ? "expires " + new Date(m.expires_at * 1000).toLocaleTimeString() : "");
+    if (display.password_warning) {
+      const warn = document.createElement("div");
+      warn.className = "dc-warning";
+      warn.textContent = "This looks like a password or secret field. Confirm only if you intend it.";
+      card.querySelector(".body").appendChild(warn);
+    }
+    card.querySelector('[data-act="stop"]').onclick = () => {
+      wsSend("desktop_hud_action", { reason: "hud stop" });
+      resolveDesktopCard({ action_id: m.action_id, status: "cancelled", reason: "stopped by operator" });
+    };
+    const hint = $("chathint"); if (hint) hint.remove();
+    chat.appendChild(card); chat.scrollTop = chat.scrollHeight;
+  }
+  function resolveDesktopCard(m) {
+    const card = $("dac_" + (m.action_id || "")); if (!card) return;
+    const typed = card.querySelector(".wc-typed"); if (typed) typed.remove();
+    const btns = card.querySelector(".wc-actions");
+    if (btns) {
+      btns.replaceChildren();
+      const done = document.createElement("span");
+      done.className = "wc-done";
+      done.textContent = m.status === "ok" ? "Done." :
+        m.status === "cancelled" ? "Stopped." :
+          "Not done: " + (m.reason || m.error || "blocked");
+      btns.appendChild(done);
+    }
   }
 
   $("composer").addEventListener("submit", (e) => {
@@ -1336,7 +1445,26 @@
     fetch("/api/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pref: this.value }) })
       .then(r => r.json()).then(() => loadBrain()).catch(() => {});
   };
-  if (!HUD_MODE) setTimeout(loadBrain, 1200);
+  function loadLaptopFacts() {
+    fetch("/api/agent").then(r => r.json()).then(d => {
+      const f = d.laptop_facts;
+      if (!f) { $("vFacts").textContent = "UNAVAILABLE"; return; }
+      const b = f.battery || {};
+      const net = f.network || {};
+      const apps = f.apps || [];
+      $("vFacts").textContent = b.available && b.percent != null
+        ? b.percent + "%" + (b.plugged_in ? " · plugged in" : "")
+        : "NO BATTERY DATA";
+      const ifaces = Array.isArray(net.interfaces) ? net.interfaces.length : 0;
+      $("vFactsDetail").textContent =
+        (net.available ? ifaces + " active interface(s)" : "network unavailable") +
+        " · " + (f.apps_available ? apps.length + " window(s)" : "windows unavailable");
+    }).catch(() => {
+      $("vFacts").textContent = "UNAVAILABLE";
+      $("vFactsDetail").textContent = "backend link offline";
+    });
+  }
+  if (!HUD_MODE) { setTimeout(loadBrain, 1200); setTimeout(loadLaptopFacts, 1200); setInterval(loadLaptopFacts, 30000); }
 
   /* =========================== CONTROLS =========================== */
   $("btnListen").addEventListener("click", function () {
@@ -1388,6 +1516,11 @@
     bar.addEventListener("pointercancel", endDrag);
     bar.addEventListener("lostpointercapture", endDrag);
     $("hudHide").onclick = () => hudBridge({ op: "hide-hud" });
+    $("hudStop").onclick = () => {
+      wsSend("desktop_hud_action", { reason: "hud stop" });
+      hudBridge({ op: "stop-desktop" });
+      hudNote("desktop action stopped", 2500);
+    };
     $("hudOpen").onclick = () => hudBridge({ op: "open-full" });
     $("hudMute").onclick = function () {
       const on = this.classList.toggle("on");

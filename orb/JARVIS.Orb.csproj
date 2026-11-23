@@ -12,6 +12,10 @@
          Application.SetHighDpiMode (WinForms' supported path). -->
     <!-- Native AOT would need WebView2 ref assemblies; framework-dependent is the
          lightweight choice for a machine that already has the .NET 8 runtime. -->
+    <!-- MSB3277: the WebView2 package ships a Wpf assembly whose WindowsBase
+         reference is unified against the WindowsDesktop pack. Benign; silence
+         the version-unification warning at project level. -->
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

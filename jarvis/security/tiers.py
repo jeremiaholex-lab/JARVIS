@@ -35,6 +35,14 @@ _CONFIRMED_TOOL_TIERS: Dict[str, str] = {
     "git_push": "destructive",
     "file_delete": "destructive",
     "browser_post": "destructive",
+    # State-changing desktop actions require the typed 'yes, do it' phrase.
+    "desktop_open_app": "destructive",
+    "desktop_open_file": "destructive",
+    "desktop_move_cursor": "destructive",
+    "desktop_click": "destructive",
+    "desktop_scroll": "destructive",
+    "desktop_type": "destructive",
+    "desktop_press_keys": "destructive",
 }
 
 # Plugin on-ramp: tool names a host-loaded extension is allowed to register.
@@ -46,6 +54,13 @@ _CONFIRMED_TOOL_TIERS: Dict[str, str] = {
 # writes, open for reads.
 _EXTENSION_TOOL_NAMES: frozenset[str] = frozenset({
     "system_info",  # jarvis/plugins/system_info.py — host CPU/memory/disk snapshot
+    # Groundwork for jarvis/plugins/system_facts.py (Task 2). No plugin module
+    # or plugin tool exists yet; this entry only makes the future READ tools
+    # registerable once that module is implemented.
+    "system_battery_status",
+    "system_network_status",
+    "system_open_apps",
+    "system_overview",
 })
 
 

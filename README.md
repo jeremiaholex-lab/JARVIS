@@ -12,8 +12,33 @@ The orb is the instrument surface: its color and motion show whether JARVIS is l
 - Route each turn between a local Ollama model and a configurable cloud endpoint, with explicit slash-command model preference.
 - Listen through wake-word detection, voice activity detection, and local transcription; speak through hybrid hosted CrowLLM/Gemini TTS with local Kokoro fallback.
 - Propose writes and file edits through confirmation gates. Nothing is written until the operator confirms.
+- Propose seven desktop actions (open app/file, move cursor, click, scroll, type, press keys) behind typed confirmation. Tool calls never perform OS input by themselves.
+- Answer read-only laptop questions about battery, network, and open applications.
 - Expose traces, security tiers, skill state, and a hash-chained audit trail in the interface.
 - Run a behavioral eval suite offline to check routing, tool use, memory, and safety decisions.
+
+### Desktop control and live system facts
+
+The seven desktop tools are `desktop_open_app`, `desktop_open_file`, `desktop_move_cursor`, `desktop_click`, `desktop_scroll`, `desktop_type`, and `desktop_press_keys`. All are `DESTRUCTIVE` built-ins: the agent may only propose one, and the tool call returns a pending card payload without moving the pointer, clicking, typing, scrolling, or launching anything. A card shows a safe preview and a local screenshot crop of the target area; the exact action travels in an approval snapshot.
+
+Confirmation rules:
+
+- Execution requires the typed phrase `yes, do it` and an exact match of the card snapshot.
+- A proposal is one-shot; a stale, altered, repeated, or already-approved card fails closed.
+- Only one desktop action is allowed per user request. Multi-step sequences and mixed batches are rejected, never partially executed.
+- If the native overlay is not connected and sending a fresh heartbeat, no card is admitted and no input runs.
+- A new user turn cancels the previous pending action. The HUD Stop button and `Ctrl+Alt+J` also cancel it. Escape is not intercepted globally.
+- Sensitive window titles and processes (password managers, banking, private/incognito browsing) are hidden from facts, cards, target lists, and screenshot crops. A sensitive window vetoes capture entirely. Sensitive-sounding local document names stay exact in the approved target, but their card preview is redacted.
+- Safe launch policy: documents, folders, common applications, and `.lnk` shortcuts are allowed. `.exe` (except common applications under Program Files), scripts, URLs/URI schemes, network paths, and alternate streams are rejected before a confirmation card exists and are revalidated immediately before execution.
+- Entering text that looks like a password or secret shows a prominent warning on the card, but explicit typed approval still allows it.
+
+Example prompts:
+
+- "What is my battery status and what apps are open?" — read-only answer; no desktop action card.
+- "Open Notepad for me." — a pending card; nothing opens until you type `yes, do it`.
+- "Click the OK button at 640, 480 and tell me when it is done." — one card with a local crop; no input before approval.
+- "Type `hello` at 300, 200." — one card; exact text is part of the snapshot.
+- "Stop that desktop action." or `Ctrl+Alt+J` — cancels the pending action; it will not execute.
 
 ## Architecture
 

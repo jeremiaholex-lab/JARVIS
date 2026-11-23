@@ -39,7 +39,10 @@ public sealed class OverlayForm : Form
     private POINT _dragCursorStart;
 
     public event Action? HideRequested;
+    /// <summary>Backend overlay op relayed by the page to the native shell.</summary>
+    public event EventHandler<string>? CursorCommandReceived;
     public event Action? OpenFullRequested;
+    private readonly System.Windows.Forms.Timer _heartbeat;
 
     public OverlayForm()
     {
@@ -56,6 +59,11 @@ public sealed class OverlayForm : Form
 
         _dragTimer = new System.Windows.Forms.Timer { Interval = 15 };
         _dragTimer.Tick += (_, _) => DragTick();
+
+        // A 2 s heartbeat proves this shell is alive. The backend blocks every
+        // desktop action when it stops receiving these (fail closed).
+        _heartbeat = new System.Windows.Forms.Timer { Interval = 2000 };
+        _heartbeat.Tick += (_, _) => OrbAppContext.SendNativeHeartbeat();
 
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
     }
@@ -165,6 +173,8 @@ public sealed class OverlayForm : Form
         {
             _ready = true;
             ApplyMic();
+            OrbAppContext.SendNativeHeartbeat();
+            _heartbeat.Start();
         };
 
         try
@@ -189,6 +199,25 @@ public sealed class OverlayForm : Form
 
     // -------------------------------------------------------- page messages
 
+    private void PostBridge(string op, string? extraKey = null, string? extraValue = null)
+    {
+        if (!_ready) return;
+        var fields = new Dictionary<string, string?> { ["op"] = op };
+        if (extraKey is not null) fields[extraKey] = extraValue;
+        PostToPage(JsonSerializer.Serialize(fields));
+    }
+
+    /// <summary>Send a JSON op to the page (used by OrbAppContext for stops).</summary>
+    public void PostToPage(string json)
+    {
+        if (!_ready) return;
+        var core = _web.CoreWebView2;
+        if (core is null) return;
+        // postWebMessageJson sends the op to the page, which relays it to /ws.
+        _ = core.ExecuteScriptAsync("window.jarvisHud&&window.jarvisHud.bridge&&"
+            + "window.jarvisHud.bridge(" + json + ")");
+    }
+
     private void OnWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         try
@@ -196,14 +225,26 @@ public sealed class OverlayForm : Form
             using var doc = JsonDocument.Parse(e.WebMessageAsJson);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return;
-            if (!root.TryGetProperty("op", out var opEl)) return;
+            if (!root.TryGetProperty("op", out var opEl)
+                || opEl.ValueKind != JsonValueKind.String) return;
+            string op = opEl.GetString() ?? "";
 
-            switch (opEl.GetString())
+            // The page forwards backend overlay ops back to the native shell.
+            // HMAC verification happens in OrbAppContext; an unsigned op from
+            // page script cannot drive the cursor window.
+            if (OrbAppContext.IsTrustedRelay(e.WebMessageAsJson))
+                CursorCommandReceived?.Invoke(this, e.WebMessageAsJson);
+
+            switch (op)
             {
                 case "dragStart": BeginDrag(); break;
                 case "dragEnd": EndDrag(); break;
                 case "hide-hud": HideRequested?.Invoke(); break;
                 case "open-full": OpenFullRequested?.Invoke(); break;
+                case "stop-desktop":
+                    // HUD Stop: cancel the pending action through the backend.
+                    PostBridge("desktop_hud_action", "reason", "hud stop");
+                    break;
             }
         }
         catch (JsonException)
@@ -372,6 +413,8 @@ public sealed class OverlayForm : Form
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _dragTimer.Stop();
         _dragTimer.Dispose();
+        _heartbeat.Stop();
+        _heartbeat.Dispose();
         base.OnFormClosed(e);
     }
 

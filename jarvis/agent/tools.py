@@ -20,9 +20,13 @@ in the executor, not the UI.
 """
 from __future__ import annotations
 
+import base64
+import copy
 import json
 import logging
+import secrets
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,11 +39,26 @@ _logger = logging.getLogger(__name__)
 # Names only. Execution is local and read-only; nothing here mutates state.
 _READ_TOOL_NAMES = ("jarvis_projects_read", "jarvis_rag_search")
 
+_DESKTOP_PROPOSAL_TTL_SECONDS = 120.0  # typed-approval window
+
+# Desktop tools are side-effect-free proposers: calling one registers a
+# pending DesktopAction and returns a confirmation card payload; no OS input
+# happens here.
+_DESKTOP_PROPOSER_NAMES = (
+    "desktop_open_app",
+    "desktop_open_file",
+    "desktop_move_cursor",
+    "desktop_click",
+    "desktop_scroll",
+    "desktop_type",
+    "desktop_press_keys",
+)
+
 # Non-READ tools execute() will still run, because their fn is a side-effect
 # free *proposer*: it only queues a pending change for host confirmation. The
 # list must stay tiny and explicit — a new write tool is not callable here
 # until it is added to this tuple and proven to do no mutation on its own.
-_PROPOSE_ONLY_TOOLS = ("jarvis_projects_write", "jarvis_file_edit")
+_PROPOSE_ONLY_TOOLS = ("jarvis_projects_write", "jarvis_file_edit") + _DESKTOP_PROPOSER_NAMES
 
 # Non-READ tools execute() runs because their effect is local, reversible and
 # actually happens (unlike a proposer). An explicit "remember this" belongs in
@@ -369,6 +388,172 @@ def _projects_write(action: str = "", name: str = "", path: str = "",
             params[key] = val
     out = _WRITE_EXECUTOR.propose(params)
     return json.dumps(out, ensure_ascii=False)
+
+
+def _desktop_capture_control():
+    """Boundary used only for crop geometry. Constructed lazily, never in tests.
+
+    ``capture_target_crop`` reads window geometry through this control; it does
+    not move the cursor, click, type, scroll, or open anything. Keeping the
+    factory here lets tests substitute a fake without importing Win32 ctypes.
+    """
+    from jarvis.desktop.win32_control import Win32DesktopControl
+
+    return Win32DesktopControl()
+
+
+def _desktop_crop_bytes(target: dict) -> str:
+    """Return a locally captured confirmation crop, or fail closed.
+
+    Sensitive windows and capture faults veto the proposal: no card is created
+    when the crop cannot be safely produced. The PNG stays local as base64 text
+    for the orb handoff; it is never uploaded and never enters the snapshot.
+    """
+    x, y = target.get("x"), target.get("y")
+    if (x is None or y is None) or (
+        (isinstance(x, str) and not x.strip()) or (isinstance(y, str) and not y.strip())
+    ):
+        return ""
+    from jarvis.desktop.evidence import (
+        SensitiveTargetError,
+        capture_target_crop,
+    )
+    from jarvis.vision.screen import ScreenCaptureError
+
+    try:
+        png = capture_target_crop(_desktop_capture_control(), int(x), int(y), radius=160)
+    except (SensitiveTargetError, ScreenCaptureError, ValueError, OSError, TypeError):
+        return ""
+    return base64.b64encode(png).decode("ascii")
+
+
+def _propose_desktop_action(kind: str, target: dict, evidence: dict) -> str:
+    """Propose one desktop action; never performs OS input (Task 1).
+
+    Two distinct payloads matter here:
+      * ``target`` is the exact user-requested action argument. It is the
+        executable payload bound by the approval snapshot and must NOT be
+        redacted — a path such as C:/Banking/statement.pdf is legitimate.
+      * ``evidence`` is the card/screen copy. Sensitive window/process
+        descriptions are redacted there, as required by the spec.
+    """
+    from jarvis.desktop.actions import (
+        DesktopAction,
+        create_desktop_action_proposal,
+        redact_sensitive,
+    )
+
+    safe_target = copy.deepcopy(target)  # exact approved payload, never rewritten
+    safe_evidence = {
+        key: redact_sensitive(value) if isinstance(value, str) else copy.deepcopy(value)
+        for key, value in evidence.items()
+    }
+    # The card preview is evidence; it hides sensitive text but the target
+    # remains exact. Later tasks add the local screenshot crop to this dict.
+    safe_evidence["target_preview"] = redact_sensitive(
+        json.dumps(safe_target, ensure_ascii=False, sort_keys=True)
+    )
+
+    # Likely password/secret entry warns on the card but remains allowed after
+    # typed approval (global constraint). Flag the action, never edit its text.
+    typed_text = " ".join(
+        str(v) for k, v in safe_target.items()
+        if k in ("text", "keys", "name_or_path", "path") and isinstance(v, str)
+    ).casefold()
+    password_warning = any(
+        marker in typed_text for marker in ("password", "passwd", "pwd", "secret")
+    )
+
+    action = DesktopAction(
+        action_id="da_" + secrets.token_hex(8),
+        kind=kind,
+        target=safe_target,
+        risk="write",
+        evidence=safe_evidence,
+        expires_at=time.time() + _DESKTOP_PROPOSAL_TTL_SECONDS,
+    )
+    if password_warning:
+        # Put the warning in evidence BEFORE the snapshot is taken, so the
+        # approved action the executor receives still carries it.
+        safe_evidence["password_warning"] = True
+    proposal = create_desktop_action_proposal(action)
+    if kind in ("move_cursor", "click", "scroll"):
+        crop = _desktop_crop_bytes(safe_target)
+        if not crop:
+            # A sensitive window or failed local capture vetoes the card. The
+            # pending action is discarded; no approval key can release it.
+            from jarvis.desktop.actions import cancel_pending_desktop_actions
+
+            cancel_pending_desktop_actions("crop capture unavailable")
+            return json.dumps({
+                "error": "No safe local screenshot crop was available; no card was created.",
+                "status": "rejected",
+                "note": "Nothing was done.",
+            }, ensure_ascii=False)
+        from jarvis.desktop.actions import _set_desktop_proposal_hook
+
+        # Crop bytes belong only on the orb's local hook. Putting them in the
+        # returned JSON would send a screenshot to the model provider and burn
+        # context, contradicting the local-only guarantee.
+        hook_proposal = dict(proposal)
+        hook_proposal["crop_bytes"] = crop
+        _set_desktop_proposal_hook(hook_proposal)
+    if password_warning:
+        proposal["password_warning"] = True
+        proposal["note"] += (
+            " WARNING: this looks like a password/secret field; type 'yes, do it' "
+            "only if you intend JARVIS to enter it."
+        )
+    return json.dumps(proposal, ensure_ascii=False)
+
+
+def _propose_desktop_launch(kind: str, target: dict) -> str:
+    """Reject unsafe launch targets *before* a proposal or card exists.
+
+    Task 4 owns the policy; Task 5 revalidates it immediately before execution.
+    Checking it here closes the integration gap where a blocked target could
+    still produce a pending card that the operator would be asked to approve.
+    The reason is a fixed English string and never echoes the target.
+    """
+    from jarvis.desktop.targets import validate_launch_target
+
+    value = target.get("name_or_path") or target.get("path") or ""
+    allowed, why = validate_launch_target(str(value))
+    if not allowed:
+        return json.dumps({
+            "error": why,
+            "status": "rejected",
+            "note": "No confirmation card was created and nothing was opened.",
+        }, ensure_ascii=False)
+    return _propose_desktop_action(kind, target, {})
+
+
+def _desktop_open_app(name_or_path: str) -> str:
+    return _propose_desktop_launch("open_app", {"name_or_path": name_or_path})
+
+
+def _desktop_open_file(path: str) -> str:
+    return _propose_desktop_launch("open_file", {"path": path})
+
+
+def _desktop_move_cursor(x: int, y: int, monitor=None) -> str:
+    return _propose_desktop_action("move_cursor", {"x": x, "y": y, "monitor": monitor}, {})
+
+
+def _desktop_click(x: int, y: int, button: str = "left", clicks: int = 1) -> str:
+    return _propose_desktop_action("click", {"x": x, "y": y, "button": button, "clicks": clicks}, {})
+
+
+def _desktop_scroll(x: int, y: int, direction: str, amount: int) -> str:
+    return _propose_desktop_action("scroll", {"x": x, "y": y, "direction": direction, "amount": amount}, {})
+
+
+def _desktop_type(text: str, x=None, y=None) -> str:
+    return _propose_desktop_action("type", {"text": text, "x": x, "y": y}, {})
+
+
+def _desktop_press_keys(keys, x=None, y=None) -> str:
+    return _propose_desktop_action("press_keys", {"keys": keys, "x": x, "y": y}, {})
 
 
 def _file_edit(action: str = "", path: str = "", old_string: str = "",
@@ -1035,6 +1220,79 @@ def build_tools(extension_tools: Optional[List[AgentTool]] = None) -> List[Agent
         fn=_remember,
         tier=Tier.WRITE,
     ))
+    # Desktop control (Task 1): all state-changing tools are non-READ builtins
+    # whose functions only propose a confirmed action. No OS input occurs here.
+    _DESKTOP_SCHEMAS: Dict[str, tuple[str, Callable[..., str], Dict[str, Any]]] = {
+        "desktop_open_app": (
+            "Propose opening a common application, document, folder, or .lnk shortcut. "
+            "Executables, scripts and URLs are not supported in v1. NOTHING is opened "
+            "until the user types the confirmation phrase.",
+            _desktop_open_app,
+            {"type": "object", "properties": {"name_or_path": {"type": "string"}},
+             "required": ["name_or_path"]},
+        ),
+        "desktop_open_file": (
+            "Propose opening one document or folder. NOTHING is opened until the user "
+            "types the confirmation phrase.",
+            _desktop_open_file,
+            {"type": "object", "properties": {"path": {"type": "string"}},
+             "required": ["path"]},
+        ),
+        "desktop_move_cursor": (
+            "Propose moving the desktop cursor to a coordinate. No pointer movement "
+            "happens until the user types the confirmation phrase.",
+            _desktop_move_cursor,
+            {"type": "object", "properties": {
+                "x": {"type": "integer"}, "y": {"type": "integer"},
+                "monitor": {"type": ["integer", "null"]}},
+             "required": ["x", "y"]},
+        ),
+        "desktop_click": (
+            "Propose a mouse click at a coordinate. No click happens until the user "
+            "types the confirmation phrase.",
+            _desktop_click,
+            {"type": "object", "properties": {
+                "x": {"type": "integer"}, "y": {"type": "integer"},
+                "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                "clicks": {"type": "integer"}},
+             "required": ["x", "y"]},
+        ),
+        "desktop_scroll": (
+            "Propose scrolling at a coordinate. No scroll happens until the user types "
+            "the confirmation phrase.",
+            _desktop_scroll,
+            {"type": "object", "properties": {
+                "x": {"type": "integer"}, "y": {"type": "integer"},
+                "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                "amount": {"type": "integer"}},
+             "required": ["x", "y", "direction", "amount"]},
+        ),
+        "desktop_type": (
+            "Propose typing exact text on the desktop. No keystroke happens until the "
+            "user types the confirmation phrase.",
+            _desktop_type,
+            {"type": "object", "properties": {
+                "text": {"type": "string"},
+                "x": {"type": ["integer", "null"]}, "y": {"type": ["integer", "null"]}},
+             "required": ["text"]},
+        ),
+        "desktop_press_keys": (
+            "Propose pressing a list of keys on the desktop. No keystroke happens until "
+            "the user types the confirmation phrase.",
+            _desktop_press_keys,
+            {"type": "object", "properties": {
+                "keys": {"type": "array", "items": {"type": "string"}},
+                "x": {"type": ["integer", "null"]}, "y": {"type": ["integer", "null"]}},
+             "required": ["keys"]},
+        ),
+    }
+    for name in _DESKTOP_PROPOSER_NAMES:
+        description, fn, parameters = _DESKTOP_SCHEMAS[name]
+        tools.append(AgentTool(
+            name=name, description=description, parameters=parameters,
+            fn=fn, tier=Tier.DESTRUCTIVE,
+        ))
+
     from jarvis.agent.registry import ToolRegistry
     registry = ToolRegistry()
     registry.register_many(tools, builtin=True)

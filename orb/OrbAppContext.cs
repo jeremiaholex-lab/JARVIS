@@ -1,3 +1,7 @@
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -20,6 +24,111 @@ public sealed class OrbAppContext : ApplicationContext
     private readonly ToolStripMenuItem _hudItem;
     private readonly IntPtr _trayIconHandle;
 
+    private static bool _secretsReady;
+
+    private static string _relaySecret = ShellHost.NativeRelaySecret;
+    private static string _shellToken = ShellHost.NativeShellToken;
+
+    /// <summary>
+    /// Verify a backend relay signature with the same canonical field order as
+    /// jarvis.desktop.actions.sign_native_relay. Static so tests can call it
+    /// without starting a WinForms desktop session.
+    /// </summary>
+    public static bool VerifyRelaySignature(string json, string secret)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("op", out var opEl)
+                || opEl.ValueKind != JsonValueKind.String) return false;
+            string op = opEl.GetString() ?? "";
+            if (!op.StartsWith("desktop_", StringComparison.Ordinal)) return false;
+            if (!root.TryGetProperty("relay_sig", out var sigEl)
+                || sigEl.ValueKind != JsonValueKind.String) return false;
+
+            static string Field(JsonElement root, string name) =>
+                root.TryGetProperty(name, out var el) && el.ValueKind != JsonValueKind.Null
+                    && el.ValueKind != JsonValueKind.Object && el.ValueKind != JsonValueKind.Array
+                    ? el.ToString()
+                    : "";
+            // Canonical field order shared with sign_native_relay: every value
+            // used by the native cursor layer is covered by the MAC.
+            string body = string.Join('|',
+                op,
+                Field(root, "action_id"), Field(root, "status"),
+                Field(root, "action"), Field(root, "reason"),
+                Field(root, "x"), Field(root, "y"),
+                Field(root, "state"), Field(root, "kind"));
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+            string expected = Convert.ToHexString(
+                hmac.ComputeHash(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
+            return CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(sigEl.GetString() ?? ""),
+                Encoding.UTF8.GetBytes(expected));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    public static bool IsTrustedRelay(string json) =>
+        _secretsReady && VerifyRelaySignature(json, _relaySecret);
+
+    public static void RefreshNativeSecrets()
+    {
+        _relaySecret = ShellHost.NativeRelaySecret;
+        _shellToken = ShellHost.NativeShellToken;
+        _secretsReady = string.IsNullOrEmpty(ShellHost.ChannelError)
+            && _relaySecret.Length == 64 && _shellToken.Length == 64;
+    }
+
+    /// <summary>
+    /// Send a heartbeat over the native-only loopback channel. The token is
+    /// used as an HTTP header and HMAC key; it is never serialized into a page
+    /// bridge message or injected by ExecuteScriptAsync.
+    /// </summary>
+    public static void SendNativeHeartbeat()
+    {
+        if (!_secretsReady) return;
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        const string op = "heartbeat";
+        var request = new HttpRequestMessage(HttpMethod.Post,
+            $"http://127.0.0.1:{ShellHost.Port}/api/native/heartbeat")
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(new Dictionary<string, string>
+                {
+                    ["op"] = op,
+                    ["nonce"] = nonce,
+                }),
+                Encoding.UTF8,
+                "application/json"),
+        };
+        request.Headers.Add("x-jarvis-shell-token", _shellToken);
+        request.Headers.Add("x-jarvis-shell-hmac",
+            ShellHost.SignNativeMessage(op, nonce, _shellToken));
+        try
+        {
+            using var response = ShellHost.NativeHttp.Send(request);
+            response.EnsureSuccessStatusCode();
+        }
+        catch (HttpRequestException)
+        {
+            // A missed heartbeat is fail-closed on the backend; do not block
+            // the UI thread with a retry loop or expose the token in logs.
+        }
+        catch (OperationCanceledException)
+        {
+            // Covers TaskCanceledException (HttpClient timeout). It must never
+            // escape a WinForms timer or navigation handler as an unhandled
+            // thread exception.
+        }
+    }
+
     // Backend supervision. When we launched the backend ourselves and it dies
     // (OOM on this box is the realistic case: whisper + kokoro + ollama push
     // past 15 GB), the orb is useless until the user restarts the shell.
@@ -33,6 +142,7 @@ public sealed class OrbAppContext : ApplicationContext
 
     private OrbForm? _window;
     private OverlayForm? _overlay;
+    private CursorOverlayForm? _cursorOverlay;
     private bool _hudVisible;
     private bool _exiting;
 
@@ -41,6 +151,7 @@ public sealed class OrbAppContext : ApplicationContext
 
     public OrbAppContext(bool startInHud)
     {
+        RefreshNativeSecrets();
         (_backend, _) = ShellHost.Launch();
         _ownsBackend = _backend is not null;
         _lastBackendStart = DateTime.Now;
@@ -64,6 +175,10 @@ public sealed class OrbAppContext : ApplicationContext
 
         _hotkey = new HotKeyWindow();
         _hotkey.Pressed += ToggleHud;
+        // Emergency stop: the same global chord cancels any pending desktop
+        // action as well as toggling the HUD. Escape is deliberately not
+        // intercepted globally (operator's explicit choice).
+        _hotkey.Pressed += () => OnDesktopStop("global hotkey");
         _hudItem.Text = _hotkey.IsRegistered
             ? $"Floating HUD\t{_hotkey.ShortcutText}"
             : "Floating HUD (use tray menu)";
@@ -114,10 +229,11 @@ public sealed class OrbAppContext : ApplicationContext
         _restarts++;
         try
         {
-            _backend.Dispose();
+            _backend?.Dispose();
         }
         catch { }
         _backend = null;
+        RefreshNativeSecrets();
 
         try
         {
@@ -157,6 +273,7 @@ public sealed class OrbAppContext : ApplicationContext
             _window.FormClosed += OnWindowClosed;
         }
 
+        _window.CursorCommandReceived += (_, json) => OnDesktopCursorCommand(json);
         _window.Show();
         // Reclaim the mic: the HUD was just hidden, and this window may have
         // been parked earlier with capture disabled.
@@ -185,6 +302,36 @@ public sealed class OrbAppContext : ApplicationContext
 
     private void ToggleHud() => SetHud(!_hudVisible);
 
+    /// <summary>Send a stop to the cursor layer and the backend (one-way).</summary>
+    private void OnDesktopStop(string reason)
+    {
+        // The backend is the only source of cursor-layer commands. Post the
+        // stop to /ws; the signed desktop_hud_action event it emits is the
+        // verified round trip that reaches ApplyDesktopCursorCommand.
+        PostOverlayBridge("desktop_hud_action", "reason", reason);
+    }
+
+    private void PostOverlayBridge(string op, string? extraKey = null,
+                                   string? extraValue = null)
+    {
+        // The HUD page relays shell ops to /ws via window.jarvisHud.bridge.
+        string json = extraKey is null
+            ? "{\"op\":\"" + op + "\"}"
+            : "{\"op\":\"" + op + "\",\"" + extraKey + "\":\"" + extraValue + "\"}";
+        _overlay?.PostToPage(json);
+        // The main orb window relays too, so Stop works with either surface.
+        _window?.PostToPage(json);
+    }
+
+    /// <summary>Forward orb overlay ops to the transparent cursor window.</summary>
+    private void OnDesktopCursorCommand(string json)
+    {
+        // Page-authored ops are unsigned and stop here. Only the backend's
+        // relay signature can unlock the native cursor layer.
+        if (!IsTrustedRelay(json)) return;
+        (_cursorOverlay ??= new CursorOverlayForm()).ApplyDesktopCursorCommand(json);
+    }
+
     private void SetHud(bool on)
     {
         if (_exiting || _hudVisible == on) return;
@@ -208,6 +355,7 @@ public sealed class OrbAppContext : ApplicationContext
         if (_overlay is null || _overlay.IsDisposed)
         {
             var overlay = new OverlayForm();
+            overlay.CursorCommandReceived += (_, json) => OnDesktopCursorCommand(json);
             overlay.HideRequested += () => SetHud(false);
             overlay.OpenFullRequested += () =>
             {
@@ -236,6 +384,10 @@ public sealed class OrbAppContext : ApplicationContext
         if (_overlay is { IsDisposed: false } overlay)
         {
             try { overlay.Close(); } catch { }
+        }
+        if (_cursorOverlay is { IsDisposed: false } cursor)
+        {
+            try { cursor.Close(); } catch { }
         }
         if (_window is { IsDisposed: false, Visible: true } window)
         {

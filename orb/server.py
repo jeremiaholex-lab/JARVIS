@@ -772,6 +772,7 @@ class AgentContext:
         configure_writes(self.writes)
         self.file_edits = self._build_file_edits()
         configure_file_edits(self.file_edits)
+        self._build_desktop_audit()
         db = governance_home() / "memory.db"
         self.memory = Memory(db)
         self.user_model = UserModel(db)
@@ -838,6 +839,22 @@ class AgentContext:
     def _vision_context(self):
         """What the look_at_screen tool needs: engines plus current settings."""
         return self.local, self.cloud_engine(), SETTINGS
+
+    def _build_desktop_audit(self):
+        """Desktop transitions share the confirm gate's hash-chained trail.
+
+        Without this injection jarvis.desktop.actions._audit() returns
+        silently, so every proposal/approval/denial/execution/failure/
+        cancellation would be unaudited in production.
+        """
+        from jarvis.desktop.actions import configure_desktop_audit
+        try:
+            from openjarvis.security.audit import AuditLogger
+            audit = AuditLogger(db_path=audit_db())
+        except Exception:
+            audit = None
+        configure_desktop_audit(audit)
+        return audit
 
     def _build_writes(self):
         """Deterministic-only secured write executor over the local project

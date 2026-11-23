@@ -149,7 +149,25 @@ Secrets are ignored by Git. Do not commit `.env`, OAuth token files, API keys, m
 
 ## Getting started
 
-### 1. Get the source and pinned runtime
+### One-command install (Windows 11)
+
+From a PowerShell prompt in the folder where you want JARVIS installed, run:
+
+```powershell
+irm https://raw.githubusercontent.com/jeremiaholex-lab/JARVIS/master/scripts/install.ps1 | iex
+```
+
+The installer checks or installs Git, Python 3.12+, .NET SDK 8, winget, and Ollama; clones the private repository; installs the Python runtime; pulls `qwen3:1.7b`; and asks for optional API keys with links to the relevant provider pages. Leave any prompt blank to skip it. Credentials are saved only in the gitignored `.env` file. The repository is private, so GitHub will ask for account access.
+
+If you prefer to review the installer before running it, download and inspect [`scripts/install.ps1`](scripts/install.ps1) first, then run:
+
+```powershell
+.\scripts\install.ps1
+```
+
+### Manual setup
+
+#### 1. Get the source and pinned runtime
 
 ```powershell
 git clone https://github.com/jeremiaholex-lab/JARVIS.git
@@ -159,7 +177,7 @@ git submodule update --init --recursive
 
 The repository is private, so GitHub will ask for account access.
 
-### 2. Install Python dependencies
+#### 2. Install Python dependencies
 
 This checkout uses a local Python runtime environment. Install the packages required by the vendored OpenJarvis runtime and JARVIS, then confirm pytest can import both trees:
 
@@ -169,7 +187,7 @@ python -m pytest --collect-only -q
 
 `conftest.py` adds the project root, `openjarvis_runtime/src`, and `orb` to the import path, so a plain pytest run works without activating a specific virtual environment.
 
-### 3. Start the orb
+### Start the orb
 
 From the repository root:
 

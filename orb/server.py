@@ -1071,6 +1071,36 @@ def relay_secret() -> str:
     return _overlay.native_relay_secret()
 
 
+def build_desktop_control():
+    """The real desktop control adapter for the orb settle path.
+
+    A module-level seam so the lazy build is reachable from a regression test
+    without instantiating the whole app. The historical bug: the settle path
+    called ``DesktopControl()`` — a ``typing.Protocol``, which Python refuses
+    to instantiate (``TypeError: Protocols cannot be instantiated``) — so the
+    typed confirmation crashed the socket before the executor ever ran. The
+    first-party adapter ``Win32DesktopControl`` is the object that implements
+    the 8-method protocol against the real Win32 boundary.
+    """
+    from jarvis.desktop.win32_control import Win32DesktopControl
+
+    return Win32DesktopControl()
+
+
+def desktop_result_detail(result: dict) -> str:
+    """Detail text for the settle path's desktop_result event.
+
+    A module-level seam so the fallback rule is reachable from regression
+    tests without instantiating the whole app. "blocked" is a fallback for
+    an opaque *failure* only: a successful execution carries no error or
+    reason key and must not be relabelled "blocked".
+    """
+    detail = str(result.get("error") or result.get("reason") or "")
+    if result.get("status") == "ok":
+        return ""
+    return detail or "blocked"
+
+
 def set_pending_desktop_proposal(proposal: dict) -> None:
     """Mirror the Task 1 proposal hook for tests and non-orb hosts."""
     from jarvis.desktop.actions import _set_desktop_proposal_hook
@@ -1892,8 +1922,6 @@ def build_app():
 
     async def settle_desktop_confirmation(c: Client, q, msg: dict) -> None:
         """Typed phrase + exact snapshot + live overlay, or nothing executes."""
-        from jarvis.desktop.win32_control import DesktopControl
-
         # A /ws desktop_confirm op has no client_id field of its own. Bind it
         # to the connection that received it so a second window cannot approve
         # a card owned by the first window's turn.
@@ -1907,11 +1935,11 @@ def build_app():
 
         if c.desktop_control is None:
             # Constructed lazily on the orb host only; tests inject fakes.
-            c.desktop_control = DesktopControl()
+            c.desktop_control = build_desktop_control()
         result = await asyncio.to_thread(
             execute_desktop_confirmation, msg, c.desktop_control)
         action_id = str(msg.get("action_id") or result.get("action_id") or "")
-        detail = result.get("error") or result.get("reason") or "blocked"
+        detail = desktop_result_detail(result)
         for event in desktop_cursor_result_events(action_id, result["status"], detail):
             emit_signed(c, q, event["op"],
                         **{k: v for k, v in event.items() if k != "op"})

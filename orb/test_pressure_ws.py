@@ -77,7 +77,7 @@ def pressure_env(monkeypatch):
 
 def test_pressure_transitions_are_broadcast_and_never_spammed(pressure_env):
     c = pressure_env
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         # drain until the first pressure message
         deadline = time.time() + 40
         seen = []

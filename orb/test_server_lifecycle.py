@@ -12,7 +12,7 @@ def test_websocket_disconnect_is_a_normal_close() -> None:
     try:
         app = server.build_app()
         with TestClient(app, client=("127.0.0.1", 12345)) as client:
-            with client.websocket_connect("/ws") as websocket:
+            with client.websocket_connect(f"/ws?token={client.app.state.task_api_token}") as websocket:
                 hello = websocket.receive_json()
                 assert hello["op"] == "hello"
             # Exiting websocket_connect sends a normal close. The app must

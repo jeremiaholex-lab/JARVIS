@@ -68,7 +68,7 @@ def frames_to_base64(count, chunk_samples=320):
 
 def test_predictions_keep_coming_for_the_whole_session(client):
     c, oww = client
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         hello = ws.receive_json()
         assert hello["op"] == "hello"
 
@@ -86,7 +86,7 @@ def test_predictions_keep_coming_for_the_whole_session(client):
 
 def test_every_scored_frame_is_a_full_80ms_window(client):
     c, oww = client
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         for payload in frames_to_base64(10):
             ws.send_json({"op": "audio", "data": payload})
@@ -97,7 +97,7 @@ def test_every_scored_frame_is_a_full_80ms_window(client):
 def test_frames_are_contiguous_and_never_resent(client):
     """Overlap would double-count audio; gaps would lose the wake word."""
     c, oww = client
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         for payload in frames_to_base64(8):
             ws.send_json({"op": "audio", "data": payload})
@@ -125,7 +125,7 @@ def test_wake_word_actually_triggers_listening(monkeypatch):
     app = server.build_app()
     try:
         with TestClient(app, client=("127.0.0.1", 12345)) as c:
-            with c.websocket_connect("/ws") as ws:
+            with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
                 ws.receive_json()
                 for payload in frames_to_base64(6):
                     ws.send_json({"op": "audio", "data": payload})
@@ -151,7 +151,7 @@ def test_wake_peak_is_reported_for_threshold_debugging(monkeypatch):
     app = server.build_app()
     try:
         with TestClient(app, client=("127.0.0.1", 12345)) as c:
-            with c.websocket_connect("/ws") as ws:
+            with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
                 ws.receive_json()
                 for payload in frames_to_base64(4):
                     ws.send_json({"op": "audio", "data": payload})

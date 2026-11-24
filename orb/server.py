@@ -1483,10 +1483,16 @@ def build_app():
         source = source.replace("</head>", bootstrap + "</head>", 1)
         return HTMLResponse(source, headers=NO_UI_CACHE)
 
+    STATIC_ROOT = (HERE / "static").resolve()
+
     @app.get("/static/{path:path}")
     def static(path: str):
-        p = (HERE / "static" / path)
-        return FileResponse(p, headers=NO_UI_CACHE) if p.exists() else JSONResponse({}, status_code=404)
+        # Resolve, then confine: `..` segments and drive-absolute paths would
+        # otherwise escape the static root and read arbitrary files.
+        p = (STATIC_ROOT / path).resolve()
+        if not p.is_relative_to(STATIC_ROOT) or not p.is_file():
+            return JSONResponse({}, status_code=404)
+        return FileResponse(p, headers=NO_UI_CACHE)
 
     @app.get("/api/ollama-models")
     def ollama_models():
@@ -2277,8 +2283,39 @@ def build_app():
 
     # ------------------------------------------------------------ websocket
 
+    def _authorize_ws(wsc: WebSocket) -> bool:
+        client = wsc.client
+        if client is None or client.host not in {"127.0.0.1", "::1", "localhost"}:
+            return False
+        origin = wsc.headers.get("origin")
+        if not origin:
+            # Native and CLI clients on this machine (tests, eval harness) send
+            # no Origin; the loopback client check above is their gate.
+            return True
+        # A browser always sends Origin, so the browser path is the one that
+        # must prove it is the page this server rendered: same-origin, a
+        # loopback Host (DNS rebinding keeps the attacker's name), and the
+        # per-session task token.
+        from urllib.parse import urlsplit
+        parsed = urlsplit(origin)
+        host = wsc.headers.get("host", "")
+        host_name = host.rsplit(":", 1)[0].strip("[]").casefold()
+        if parsed.scheme != "http" or parsed.netloc.casefold() != host.casefold():
+            return False
+        if host_name not in {"127.0.0.1", "localhost", "::1"}:
+            return False
+        supplied = wsc.query_params.get("token", "") or wsc.headers.get("x-jarvis-task-token", "")
+        return bool(supplied) and hmac.compare_digest(supplied, app.state.task_api_token)
+
     @app.websocket("/ws")
     async def ws(wsc: WebSocket):
+        # A browser page on any origin can reach this loopback port via DNS
+        # rebinding, so the handshake needs the same task token the page
+        # receives at / - accepted connections can read files and rewrite
+        # settings.
+        if not _authorize_ws(wsc):
+            await wsc.close(code=1008)
+            return
         await wsc.accept()
         try:
             c = Client(memory=agent_context().memory)

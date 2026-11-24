@@ -30,9 +30,10 @@ def _no_sandbox(monkeypatch, tmp_path):
     """Keep the test focused on patch application, not real process isolation."""
     captured = {}
 
-    def fake_run(test_script, *, workdir, timeout):
+    def fake_run(test_script, *, workdir, timeout, prefer="auto"):
         captured["script"] = test_script
         captured["workdir"] = workdir
+        captured["prefer"] = prefer
         captured["skill_text"] = (workdir / "skill" / "sample.py").read_text(encoding="utf-8")
         return type("Result", (), {
             "passed": True,
@@ -167,6 +168,54 @@ def test_heal_failure_applies_full_file_replacements_before_sandbox_test(tmp_pat
     )
 
     assert captured["skill_text"] == "value = 'new'\n"
+
+
+def test_heal_failure_refuses_an_unsafe_test_script_before_running_it(tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "sample-skill").mkdir(parents=True)
+    (skills_dir / "sample-skill" / "sample.py").write_text("old = True\n", encoding="utf-8")
+    captured = _no_sandbox(monkeypatch, tmp_path)
+    candidate_root = _candidate_root(tmp_path)
+    payload = {
+        "diagnosis": "steer the test script",
+        "fix": "",
+        "test_script": "import subprocess\nsubprocess.run(['calc.exe'])\n",
+        "changed_files": ["sample.py"],
+    }
+
+    candidate = watcher.heal_failure(
+        _failure(),
+        local_engine=FakeEngine(payload),
+        skills_dir=skills_dir,
+        candidate_root=candidate_root,
+    )
+
+    assert captured == {}  # run_skill_tests was never reached
+    assert candidate.sandbox_passed is False
+    assert "test script rejected" in candidate.note
+    assert not (candidate.candidate_dir / "test_skill.py").exists()
+
+
+def test_heal_failure_requires_docker_isolation(tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "sample-skill").mkdir(parents=True)
+    (skills_dir / "sample-skill" / "sample.py").write_text("old = True\n", encoding="utf-8")
+    captured = _no_sandbox(monkeypatch, tmp_path)
+    payload = {
+        "diagnosis": "fine",
+        "fix": "",
+        "test_script": "print('checking patched skill')",
+        "changed_files": ["sample.py"],
+    }
+
+    watcher.heal_failure(
+        _failure(),
+        local_engine=FakeEngine(payload),
+        skills_dir=skills_dir,
+        candidate_root=_candidate_root(tmp_path),
+    )
+
+    assert captured["prefer"] == "docker"
 
 
 def test_heal_failure_refuses_a_patch_target_outside_the_scratch_skill(tmp_path, monkeypatch):

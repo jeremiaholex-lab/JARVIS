@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from openjarvis.core.paths import get_config_dir
+from openjarvis.tools.code_interpreter import UnsafeCodeError, _validate_ast
 
 from jarvis.skills.sandbox_test import run_skill_tests
 
@@ -249,15 +250,29 @@ def heal_failure(
     except ValueError as exc:
         patch_note = f"patch rejected: {exc}"
     test_script = payload.get("test_script", "print('no test provided')")
-    (work / "test_skill.py").write_text(test_script, encoding="utf-8")
+    test_script = str(test_script)
+    test_passed = False
+    test_note = ""
+    try:
+        # The script is model output driven by a failure trace, so it gets the
+        # same structural gate as sandbox_execute before touching disk.
+        _validate_ast(test_script)
+    except (UnsafeCodeError, SyntaxError) as exc:
+        test_note = f"test script rejected: {exc}"
+    else:
+        (work / "test_skill.py").write_text(test_script, encoding="utf-8")
 
-    # The patched skill is a scratch tree, not the live one: test in the
-    # restricted process with the scratch tree as the test's working dir.
-    test_result = run_skill_tests(
-        test_script,
-        workdir=work,
-        timeout=120.0,
-    )
+        # The patched skill is a scratch tree, not the live one: test in the
+        # restricted process with the scratch tree as the test's working dir.
+        # Docker is required here: the process fallback runs as this user.
+        test_result = run_skill_tests(
+            test_script,
+            workdir=work,
+            timeout=120.0,
+            prefer="docker",
+        )
+        test_passed = test_result.passed if not patch_note else False
+        test_note = test_result.note
     candidate = HealCandidate(
         failure=failure,
         diagnosis=payload.get("diagnosis", ""),
@@ -265,8 +280,8 @@ def heal_failure(
         test_script=test_script,
         changed_files=changed_files,
         candidate_dir=work,
-        sandbox_passed=test_result.passed if not patch_note else False,
-        note=f"{patch_note}; {test_result.note}" if patch_note else test_result.note,
+        sandbox_passed=test_passed,
+        note=f"{patch_note}; {test_note}" if patch_note else test_note,
     )
     return candidate
 

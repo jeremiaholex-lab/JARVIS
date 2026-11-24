@@ -260,7 +260,7 @@ def wait_until(predicate, timeout: float = 5.0) -> bool:
 
 def test_playback_done_opens_the_followup_window(ws_env):
     c, _env = ws_env
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         assert ws.receive_json()["op"] == "hello"
         ws.send_json({"op": "playback_done"})
         m = wait_for_op(ws, "state", state="listening")
@@ -269,7 +269,7 @@ def test_playback_done_opens_the_followup_window(ws_env):
 
 def test_playback_done_clears_barge_state_and_opens_followup(ws_env):
     c, _env = ws_env
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         client = next(iter(server.CLIENTS))
         client.playback_active = True
@@ -285,7 +285,7 @@ def test_playback_done_clears_barge_state_and_opens_followup(ws_env):
 def test_barge_in_requires_sustained_audio_and_reopens_listening(ws_env):
     c, env = ws_env
     env.whisper.text = "hey jarvis"
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         client = next(iter(server.CLIENTS))
         client.playback_active = True
@@ -321,7 +321,7 @@ def test_barge_in_requires_sustained_audio_and_reopens_listening(ws_env):
 def test_barge_without_wake_phrase_does_not_cut_off_speech(ws_env):
     c, env = ws_env
     env.whisper.text = "some ordinary words"
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         client = next(iter(server.CLIENTS))
         client.playback_active = True
@@ -343,7 +343,7 @@ def test_barge_without_wake_phrase_does_not_cut_off_speech(ws_env):
 
 def test_stale_playback_ack_does_not_end_new_reply(ws_env):
     c, _env = ws_env
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         client = next(iter(server.CLIENTS))
         client.playback_active = True
@@ -360,7 +360,7 @@ def test_stale_playback_ack_does_not_end_new_reply(ws_env):
 
 def test_barge_in_muted_is_ignored(ws_env):
     c, _env = ws_env
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         client = next(iter(server.CLIENTS))
         client.playback_active = True
@@ -374,7 +374,7 @@ def test_barge_in_muted_is_ignored(ws_env):
 
 def test_playback_done_while_muted_goes_idle(ws_env):
     c, _env = ws_env
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         ws.send_json({"op": "mute", "on": True})
         wait_for_op(ws, "state", state="muted")
@@ -384,7 +384,7 @@ def test_playback_done_while_muted_goes_idle(ws_env):
 
 def test_silent_followup_windows_rearm_up_to_the_streak_cap(ws_env):
     c, _env = ws_env
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         ws.send_json({"op": "playback_done"})
         wait_for_op(ws, "state", reason="follow-up")
@@ -422,7 +422,7 @@ def test_spoken_yes_settles_a_pending_write_offline(ws_env):
     # A closed utterance needs a speech segment plus the 1.2 s tail: 35,200
     # samples (2.2 s) of quiet with the segment ending at 16,000.
     silero_vad.get_speech_timestamps = lambda *a, **kw: [{"start": 0, "end": 16000}]
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         ws.send_json({"op": "start"})          # put the client in listening
         feed_audio(ws, silence_chunks(110))
@@ -443,7 +443,7 @@ def test_spoken_no_settles_a_pending_edit_offline(ws_env):
     env.fake.edits = [e()]
     env.whisper.text = f"no {FE}"
     silero_vad.get_speech_timestamps = lambda *a, **kw: [{"start": 0, "end": 16000}]
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         ws.receive_json()
         ws.send_json({"op": "start"})          # put the client in listening
         feed_audio(ws, silence_chunks(110))
@@ -483,7 +483,7 @@ def test_reopening_the_window_replays_the_stored_transcript(ws_env, tmp_path, mo
     mem.remember_turn("user", "x" * 5000)
     monkeypatch.setattr(env.fake, "memory", mem)
 
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         hello = ws.receive_json()
         assert hello["op"] == "hello"
         hist = hello["history"]
@@ -495,7 +495,7 @@ def test_reopening_the_window_replays_the_stored_transcript(ws_env, tmp_path, mo
 
     # The brain's own context seeds from the same rows, so what is on screen is
     # also what the model can use - and the stored notice reaches neither.
-    with c.websocket_connect("/ws") as ws:
+    with c.websocket_connect(f"/ws?token={c.app.state.task_api_token}") as ws:
         hello = ws.receive_json()
         assert hello["context_turns"] == 3
         me = next(cl for cl in server.CLIENTS if cl.client_id == hello["client_id"])

@@ -694,7 +694,8 @@
   }
 
   /* =========================== WS =========================== */
-  const WS_URL = "ws://" + location.hostname + ":8010/ws";
+  const WS_URL = "ws://" + location.hostname + ":8010/ws" +
+    (window.__JARVIS_TASK_TOKEN ? "?token=" + encodeURIComponent(window.__JARVIS_TASK_TOKEN) : "");
   let ws, reconnectMs = 1500, micChunkCount = 0, micSampleCount = 0;
   const OVERLAY_OPS = new Set([
     "desktop_confirm", "desktop_cursor_show", "desktop_cursor_move",

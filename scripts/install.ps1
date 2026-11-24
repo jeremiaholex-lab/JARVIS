@@ -14,11 +14,25 @@ function Write-JarvisEnv {
         [Parameter(Mandatory = $true)][hashtable]$Values
     )
 
-    $lines = foreach ($key in $Values.Keys | Sort-Object) {
+    # Merge over an existing .env: skipped prompts (blank values) preserve
+    # what the file already holds, and only supplied values overwrite.
+    $existing = @{}
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($line in (Get-Content -LiteralPath $Path)) {
+            if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+                $existing[$Matches[1]] = $line
+            }
+        }
+    }
+    foreach ($key in $Values.Keys) {
         $value = [string]$Values[$key]
         if (-not [string]::IsNullOrWhiteSpace($value)) {
-            '{0}={1}' -f $key, $value
+            $existing[$key] = '{0}={1}' -f $key, $value
         }
+    }
+
+    $lines = foreach ($key in $existing.Keys | Sort-Object) {
+        $existing[$key]
     }
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
     try {
@@ -86,10 +100,10 @@ function Install-Jarvis {
     Push-Location $InstallDir
     try {
         if (-not (Test-Path -LiteralPath '.git')) {
-            Write-Host 'Cloning the private JARVIS repository...' -ForegroundColor Cyan
+            Write-Host 'Cloning the public JARVIS repository...' -ForegroundColor Cyan
             & git clone --depth 1 $RepoUrl .
             if ($LASTEXITCODE -ne 0) {
-                throw 'Clone failed. Accept the GitHub invitation for jeremiaholex-lab/JARVIS, then try again.'
+                throw "Clone failed. Confirm the URL ($RepoUrl) is reachable and try again."
             }
         } else {
             & git pull --ff-only

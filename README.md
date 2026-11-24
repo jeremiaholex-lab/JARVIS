@@ -9,7 +9,7 @@ The orb is the instrument surface: its color and motion show whether JARVIS is l
 | | |
 | --- | --- |
 | **Tools** | 38 available to the agent — files, documents, web, screen, browser, laptop facts, and 7 gated desktop actions |
-| **Verification** | 880 tests passing, 5 skipped · 115/115 offline behavioral cases |
+| **Verification** | 888 tests passing, 5 skipped · 115/115 offline behavioral cases |
 | **Default brain** | Local Ollama (`qwen3:1.7b`), with an optional Gemini → Lite → Agnes cloud ladder |
 | **Voice** | Wake word → VAD → local Whisper transcription → hybrid hosted/local TTS |
 | **Platform** | Windows 11 · Python 3.12+ · .NET WebView2 |
@@ -136,6 +136,14 @@ JARVIS uses explicit action tiers:
 
 The auditor inspects actions before execution. If the optional language-model critic is unavailable or unreadable, the action is held rather than silently approved. Writes queue a token and change nothing until confirmed. File edits produce a diff first. The sentry auto-heal path patches a scratch copy of a skill and tests it in a sandbox before any candidate promotion; user files never go through the sentry.
 
+### Loopback hardening
+
+The orb backend binds `127.0.0.1:8010`, and the browser page it serves is the trusted client:
+
+- **WebSocket gate.** `/ws` accepts loopback clients without an `Origin` (the CLI and test harness). Browsers always send one, so a browser must also be same-origin, present a loopback `Host` header (which defeats DNS rebinding, where the attacker's hostname stays in both fields), and supply the per-session task token the page receives at `/`. The token is a random `secrets.token_urlsafe(32)` minted at startup, compared in constant time.
+- **Static confinement.** `/static/{path}` resolves the requested path and refuses anything outside `orb/static` — `..` segments and drive-absolute paths return 404.
+- **Sandboxed skill tests.** The sentry's model-written test scripts pass through the same AST gate as `sandbox_execute`, and run in Docker isolation only; with Docker absent the test fails closed instead of falling back to the host user.
+
 Secrets are ignored by Git. Do not commit `.env`, OAuth token files, API keys, model weights, or local databases.
 
 ## Requirements
@@ -157,7 +165,7 @@ From a PowerShell prompt in the folder where you want JARVIS installed, run:
 irm https://raw.githubusercontent.com/jeremiaholex-lab/JARVIS/master/scripts/install.ps1 | iex
 ```
 
-The installer checks or installs Git, Python 3.12+, .NET SDK 8, winget, and Ollama; clones the repository; installs the Python runtime; pulls `qwen3:1.7b`; and asks for optional API keys with links to the relevant provider pages. Leave any prompt blank to skip it. Credentials are saved only in the gitignored `.env` file.
+The installer checks that Git, Python 3.12+, .NET SDK, winget, and Ollama are present (printing a download link for anything missing); clones the public repository; installs the Python runtime into the vendored submodule's virtual environment; sanity-checks that the test suite still collects; pulls `qwen3:1.7b`; and asks for optional API keys with links to the relevant provider pages. Leave any prompt blank to skip it; supplied values are merged into the gitignored `.env` and existing keys are preserved on re-runs.
 
 If you prefer to review the installer before running it, download and inspect [`scripts/install.ps1`](scripts/install.ps1) first, then run:
 
@@ -281,7 +289,7 @@ Run the live eval only while the orb is running:
 python eval/run_eval.py --live
 ```
 
-Latest recorded results on `master`: **880 first-party tests passed, 5 skipped**; **115/115 offline behavioral cases passed**. CI checks are not configured yet, so these are local verification results.
+Latest recorded results on `master`: **888 first-party tests passed, 5 skipped**; **115/115 offline behavioral cases passed**. CI checks are not configured yet, so these are local verification results.
 
 ## Troubleshooting
 

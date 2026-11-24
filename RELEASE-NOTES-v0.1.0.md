@@ -62,8 +62,7 @@ Then install the Python dependencies and start the orb from `orb\launch_orb.bat`
 
 ## Notes
 
-- This repository is private; source access requires an invitation.
-- No license file is present yet, so no reuse license is granted at this time.
+- This release was tagged while the repository was private; it has since been made public (2026-11-24) under the Apache-2.0 license.
 - Never commit `.env`, OAuth tokens, API keys, model weights, or local databases.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

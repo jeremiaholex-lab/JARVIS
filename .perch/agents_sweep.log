@@ -1,4 +1,0 @@
-ImportError while loading conftest 'C:\Users\HP\Desktop\Projects\JARVIS\openjarvis_runtime\tests\conftest.py'.
-C:\Users\HP\Desktop\JARVIS\openjarvis_runtime\tests\conftest.py:34: in <module>
-    ???
-E   ModuleNotFoundError: No module named 'openjarvis'

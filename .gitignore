@@ -28,6 +28,11 @@ orb/obj/
 .impeccable/
 .claude/
 
+# internal agent work files (kept locally, never published)
+.perch/
+.superpowers/
+HANDOFF-prompts.md
+
 # shell logs and test audio artifacts
 orb_shell.err
 orb_shell.out

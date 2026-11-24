@@ -114,7 +114,7 @@ def test_safe_launch_targets_are_allowed(target):
     # qualified, no exceptions.
     "C:/Program Files/Google/Chrome/Application/chrome.exe",
     "C:/Program Files (x86)/evil/payload.exe",
-    "C:\\Users\\HP\\Documents\\Program Files\\payload.exe",
+    "C:\\Users\\you\\Documents\\Program Files\\payload.exe",
 ])
 def test_other_scripts_schemes_and_executables_are_rejected(target):
     allowed, reason = validate_launch_target(target)
@@ -123,7 +123,7 @@ def test_other_scripts_schemes_and_executables_are_rejected(target):
 
 
 @pytest.mark.parametrize("target", [
-    "C:/Users/HP/Documents/Notes.txt", "C:\\Users\\HP\\Desktop\\Projects",
+    "C:/Users/you/Documents/Notes.txt", "C:\\Users\\you\\Desktop\\Projects",
     "D:/Work/Chrome.lnk",
 ])
 def test_common_documents_folders_and_shortcuts_are_allowed(target):
@@ -134,8 +134,8 @@ def test_common_documents_folders_and_shortcuts_are_allowed(target):
 # alternate data streams were accepted. The drive letter is the only ':'
 # allowed anywhere in the path portion.
 @pytest.mark.parametrize("target", [
-    "C:/Users/HP/Documents/Notes.txt:hidden",
-    "C:\\Users\\HP\\Documents\\Notes.txt:hidden",
+    "C:/Users/you/Documents/Notes.txt:hidden",
+    "C:\\Users\\you\\Documents\\Notes.txt:hidden",
     "C:/Program Files/app.lnk:stream",
 ])
 def test_alternate_data_streams_on_drive_paths_are_rejected(target):

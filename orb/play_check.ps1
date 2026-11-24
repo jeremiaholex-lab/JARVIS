@@ -1,5 +1,5 @@
 Add-Type -AssemblyName System.Media
-$s = New-Object System.Media.SoundPlayer('C:\Users\HP\Desktop\JARVIS\orb\tts_check.wav')
+$s = New-Object System.Media.SoundPlayer((Join-Path $PSScriptRoot 'tts_check.wav'))
 $s.PlayLooping()
 Start-Sleep -Seconds 4
 $s.Stop()

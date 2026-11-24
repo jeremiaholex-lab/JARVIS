@@ -139,7 +139,7 @@ def demo(*, use_live_traces: bool = False) -> int:
         diagnosis="proposed change writes outside skill code",
         fix="",
         test_script="",
-        changed_files=["C:/Users/HP/Documents/report.docx"],
+        changed_files=["C:/Users/you/Documents/report.docx"],
         candidate_dir=_HOME,
         sandbox_passed=False,
     )

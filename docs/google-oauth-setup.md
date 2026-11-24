@@ -56,5 +56,3 @@ Once you have Google credentials:
 1. Update `google-oauth-client.json`
 2. Run the test command above
 3. JARVIS will then fetch real email/calendar/tasks data for the morning digest
-
-Would you like me to help you through any of these steps?

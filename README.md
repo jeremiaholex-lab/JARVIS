@@ -157,7 +157,7 @@ From a PowerShell prompt in the folder where you want JARVIS installed, run:
 irm https://raw.githubusercontent.com/jeremiaholex-lab/JARVIS/master/scripts/install.ps1 | iex
 ```
 
-The installer checks or installs Git, Python 3.12+, .NET SDK 8, winget, and Ollama; clones the private repository; installs the Python runtime; pulls `qwen3:1.7b`; and asks for optional API keys with links to the relevant provider pages. Leave any prompt blank to skip it. Credentials are saved only in the gitignored `.env` file. The repository is private, so GitHub will ask for account access.
+The installer checks or installs Git, Python 3.12+, .NET SDK 8, winget, and Ollama; clones the repository; installs the Python runtime; pulls `qwen3:1.7b`; and asks for optional API keys with links to the relevant provider pages. Leave any prompt blank to skip it. Credentials are saved only in the gitignored `.env` file.
 
 If you prefer to review the installer before running it, download and inspect [`scripts/install.ps1`](scripts/install.ps1) first, then run:
 
@@ -174,8 +174,6 @@ git clone https://github.com/jeremiaholex-lab/JARVIS.git
 cd JARVIS
 git submodule update --init --recursive
 ```
-
-The repository is private, so GitHub will ask for account access.
 
 #### 2. Install Python dependencies
 
@@ -342,3 +340,7 @@ See [PRODUCT.md](PRODUCT.md) for the product commitments a change should respect
 - [DESIGN.md](DESIGN.md) documents the orb interface, layout, voice output, and interaction principles.
 - [CODEBASE-ANALYSIS.md](CODEBASE-ANALYSIS.md) records the earlier deep architecture review and historical findings.
 - [docs/superpowers/specs](docs/superpowers/specs) contains design specifications for roles, schedules, plugins, sandboxing, and voice-first turns.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

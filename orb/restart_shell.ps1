@@ -23,8 +23,8 @@ foreach ($b in $backends) {
 Start-Sleep -Seconds 2
 
 Write-Host '--- starting orb shell ---'
-Start-Process -FilePath 'C:\Users\HP\Desktop\JARVIS\orb\bin\Release\net8.0-windows\OrbShell.exe' `
-  -WorkingDirectory 'C:\Users\HP\Desktop\JARVIS\orb'
+Start-Process -FilePath (Join-Path $PSScriptRoot 'bin\Release\net8.0-windows\OrbShell.exe') `
+  -WorkingDirectory $PSScriptRoot
 
 # Poll for the port rather than sleeping a fixed 6s: the backend imports torch,
 # faster-whisper and Kokoro before binding 8010, which takes 15-30s here, and a

@@ -12,7 +12,7 @@ max_turns = 8
 enabled = ["file_read", "file_write", "jarvis_file_undo", "shell_exec", "code_interpreter", "think", "jarvis_projects_read", "jarvis_projects_write"]
 
 [security]
-allowed_dirs = ["C:/Users/HP/Desktop/JARVIS"]
+allowed_dirs = ["."]
 enforce_tool_confirmation = true
 
 [speech]

@@ -2,8 +2,9 @@
 
 FastAPI + WebSocket server running the full voice pipeline:
     OWW wake word -> Silero VAD end-of-speech -> faster-whisper STT
-      -> local Ollama brain (qwen3:1.7b) with transparent Agnes cloud
-         escalation -> Kokoro-82M TTS streamed back to the orb window.
+      -> hosted model ladder (Gemini 3.5 -> Gemini 3.5 Lite -> Agnes;
+         Ollama is optional and powers only embeddings + the vision probe)
+         -> Kokoro-82M TTS streamed back to the orb window.
 
 The browser page owns the microphone (getUserMedia + AudioWorklet) and TTS
 playback, so there is no second consumer of the mic on the OS.

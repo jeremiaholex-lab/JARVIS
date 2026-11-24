@@ -2,7 +2,7 @@
 
 **A local-first, voice-first personal AI assistant that can actually use your computer — and asks before it touches anything.**
 
-JARVIS pairs a persistent conversational agent with real tool use, a visual desktop orb, durable background work, and a security model you can see. The default brain runs locally through Ollama; cloud escalation is optional and explicitly configured. Every action that changes your machine — writing a file, editing code, launching an app, moving the mouse — stops at a confirmation gate and waits for you.
+JARVIS pairs a persistent conversational agent with real tool use, a visual desktop orb, durable background work, and a security model you can see. Every conversational turn goes to a hosted model ladder by default (Gemini 3.5 Flash → Gemini 3.5 Lite → Agnes); Ollama is an optional local engine that, when you run one, powers semantic-memory embeddings and the screenshot/vision probe — and JARVIS degrades gracefully to hashing embeddings and a no-op vision probe when it is absent. Every action that changes your machine — writing a file, editing code, launching an app, moving the mouse — stops at a confirmation gate and waits for you.
 
 The orb is the instrument surface: its color and motion show whether JARVIS is listening, thinking, speaking, or muted. The same browser page powers a full desktop window and a floating heads-up display (HUD), sharing one microphone owner and one agent backend.
 
@@ -10,7 +10,7 @@ The orb is the instrument surface: its color and motion show whether JARVIS is l
 | --- | --- |
 | **Tools** | 38 available to the agent — files, documents, web, screen, browser, laptop facts, and 7 gated desktop actions |
 | **Verification** | 888 tests passing, 5 skipped · 115/115 offline behavioral cases |
-| **Default brain** | Local Ollama (`qwen3:1.7b`), with an optional Gemini → Lite → Agnes cloud ladder |
+| **Default brain** | Hosted ladder: Gemini 3.5 Flash → Gemini 3.5 Lite → Agnes; Ollama is optional (embeddings + vision probe) |
 | **Voice** | Wake word → VAD → local Whisper transcription → hybrid hosted/local TTS |
 | **Platform** | Windows 11 · Python 3.12+ · .NET WebView2 |
 
@@ -19,7 +19,7 @@ The orb is the instrument surface: its color and motion show whether JARVIS is l
 - Hold a persistent conversation with memory and semantic recall.
 - Use tools for local files, project data, indexed documents, web search, Google and Notion reads, screenshots, window lists, browser actions, and time.
 - Queue background work, create cron schedules, watch approved folders, and decompose multi-step goals into dependent tasks.
-- Route each turn between a local Ollama model and a configurable cloud endpoint, with explicit slash-command model preference.
+- Route every turn through a hosted model ladder (Gemini 3.5 Flash, then a second-quota Gemini tier, then Agnes), with explicit slash-command switching (`/3.5`, `/lite`, `/agnes`, `/auto`).
 - Listen through wake-word detection, voice activity detection, and local transcription; speak through hybrid hosted CrowLLM/Gemini TTS with local Kokoro fallback.
 - Propose writes and file edits through confirmation gates. Nothing is written until the operator confirms.
 - Propose seven desktop actions (open app/file, move cursor, click, scroll, type, press keys) behind typed confirmation. Tool calls never perform OS input by themselves.
@@ -110,7 +110,7 @@ Browser orb / HUD  --WebSocket-->  Python orb server
 | Plugin tools | `jarvis/plugins/` | Read-only laptop facts: battery, network, open apps, and system overview. Sensitive windows are filtered out before anything reaches the model. |
 | Background work | `jarvis/agent/task_runner.py`, `schedules.py`, `file_watchers.py`, `planner.py` | Runs durable tasks, cron schedules, watched-folder jobs, and decomposed plans. |
 | Memory and learning | `jarvis/agent/memory.py`, `semantic.py`, `user_model.py` | Stores episodes, vectors, and explicit user preferences. |
-| Model providers | `jarvis/agent/providers.py`, `brain.py`, `routing.py` | Talks to Ollama and cloud APIs, manages preferences, and chooses a model per turn. |
+| Model providers | `jarvis/agent/providers.py`, `routing.py` | Hosted Gemini → Agnes ladder for conversational turns; Ollama (when installed) backs the standalone voice-loop brain, planner, and semantic/vision fallbacks. |
 | Security | `jarvis/security/` | Classifies actions, audits them, prompts for confirmation, and enforces typed approval for destructive edits. |
 | Desktop control | `jarvis/desktop/` | The confirmed-action contract, launch policy, card evidence, app-name resolution, the Win32 input boundary, and the executor that revalidates before running. |
 | Speech | `jarvis/speech.py`, `jarvis_voice_loop.py` | Shapes spoken text and drives the local wake/speech loop. |
@@ -151,8 +151,9 @@ Secrets are ignored by Git. Do not commit `.env`, OAuth token files, API keys, m
 - Windows 11 workstation for the native orb shell and HUD.
 - Python 3.12 or newer for the backend.
 - .NET SDK for the C# WebView2 shell.
-- Ollama with a local model such as `qwen3:1.7b` for offline inference.
-- Optional: a configured cloud API key for escalation and hosted TTS.
+- A hosted model key: `GEMINI_API_KEY` (plus an optional second key `GEMINI_API_KEY_2` for the Lite tier) or `AGNES_API_KEY`. Every conversational turn goes to the hosted ladder, so at least one of these is required for the brain to answer.
+- Optional: Ollama with an embedding model (for example `nomic-embed-text`) and a vision model. JARVIS uses it for local semantic-memory embeddings and the screenshot probe, and falls back to hashing embeddings and a no-op vision probe when it is absent.
+- Optional: a configured TTS provider for hosted speech (falling back to local Kokoro).
 - Optional: connected Google, Notion, Telegram, or Microsoft 365 accounts for those specific tools.
 
 ## Getting started
@@ -165,7 +166,7 @@ From a PowerShell prompt in the folder where you want JARVIS installed, run:
 irm https://raw.githubusercontent.com/jeremiaholex-lab/JARVIS/master/scripts/install.ps1 | iex
 ```
 
-The installer checks that Git, Python 3.12+, .NET SDK, winget, and Ollama are present (printing a download link for anything missing); clones the public repository; installs the Python runtime into the vendored submodule's virtual environment; sanity-checks that the test suite still collects; pulls `qwen3:1.7b`; and asks for optional API keys with links to the relevant provider pages. Leave any prompt blank to skip it; supplied values are merged into the gitignored `.env` and existing keys are preserved on re-runs.
+The installer checks that Git, Python 3.12+, .NET SDK, and winget are present (printing a download link for anything missing); clones the public repository; installs the Python runtime into the vendored submodule's virtual environment; sanity-checks that the test suite still collects; and asks for optional API keys with links to the relevant provider pages — including `GEMINI_API_KEY`, which the hosted brain ladder needs to answer turns (an `AGNES_API_KEY` in the `.env` works as the alternative brain; add it manually if you don't use Gemini). Leave any prompt blank to skip it; supplied values are merged into the gitignored `.env` and existing keys are preserved on re-runs. Ollama is not required; if you run one locally, JARVIS picks it up for embeddings and the vision probe.
 
 If you prefer to review the installer before running it, download and inspect [`scripts/install.ps1`](scripts/install.ps1) first, then run:
 

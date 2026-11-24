@@ -1,8 +1,7 @@
 param(
     [string]$RepoUrl = 'https://github.com/jeremiaholex-lab/JARVIS.git',
     [string]$InstallDir = "$env:USERPROFILE\Desktop\Projects\JARVIS",
-    [switch]$SkipCredentials,
-    [switch]$SkipOllamaPull
+    [switch]$SkipCredentials
 )
 
 Set-StrictMode -Version Latest
@@ -42,7 +41,7 @@ function Write-JarvisEnv {
 
 function Get-JarvisPrerequisites {
     $result = [ordered]@{}
-    foreach ($tool in @('git', 'python', 'dotnet', 'winget', 'ollama')) {
+    foreach ($tool in @('git', 'python', 'dotnet', 'winget')) {
         $command = Get-Command $tool -ErrorAction SilentlyContinue
         if ($command) {
             $result[$tool] = 'present'
@@ -52,7 +51,6 @@ function Get-JarvisPrerequisites {
                 'python' { 'Install Python 3.12+ from https://www.python.org/downloads/windows/' }
                 'dotnet' { 'Install .NET SDK 8 from https://dotnet.microsoft.com/download' }
                 'winget' { 'Install App Installer from https://aka.ms/getwinget' }
-                'ollama' { 'Install from https://ollama.com/download/windows' }
             }
         }
     }
@@ -126,12 +124,6 @@ function Install-Jarvis {
         & $venvPython -m pytest --collect-only -q
         if ($LASTEXITCODE -ne 0) { throw 'Test collection failed after install.' }
         Pop-Location
-
-        if (-not $SkipOllamaPull) {
-            Write-Host 'Pulling local model qwen3:1.7b...' -ForegroundColor Cyan
-            & ollama pull qwen3:1.7b
-            if ($LASTEXITCODE -ne 0) { throw 'Ollama model pull failed.' }
-        }
 
         if (-not $SkipCredentials) {
             Write-Host "`nOptional credentials (press Enter to skip each one):" -ForegroundColor Cyan

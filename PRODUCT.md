@@ -12,11 +12,11 @@ web — served as static HTML inside a native C# WebView2 shell (`orb/OrbForm.cs
 
 ## Product Purpose
 
-JARVIS is a phased personal voice assistant. The orb page is its **instrument surface**: it makes the assistant's live state (listening / thinking / speaking / muted) legible at a glance, carries typed fallback conversation, exposes settings (local model, TTS voice, wake threshold, cloud escalation, security tiers) live, and mirrors Phase 4 governance (skill ledger, hash-chained audit readback) without leaving the window. Success = the operator can always tell what the system is doing, what it is allowed to do, and what it did.
+JARVIS is a phased personal voice assistant. The orb page is its **instrument surface**: it makes the assistant's live state (listening / thinking / speaking / muted) legible at a glance, carries typed fallback conversation, exposes settings (model preference, TTS voice, wake threshold, security tiers) live, and mirrors Phase 4 governance (skill ledger, hash-chained audit readback) without leaving the window. Success = the operator can always tell what the system is doing, what it is allowed to do, and what it did.
 
 ## Positioning
 
-Local-first, privacy-bound: the brain defaults to a local Ollama model; cloud ("Agnes") is an explicit, locally-stored escalation, and the API key never leaves the machine. Security is a first-class, visible system — tier policies (READ / WRITE / DESTRUCTIVE), a pre-execution auditor, and a hash-chained audit trail are surfaced in the UI, not hidden behind it.
+Local-first, privacy-bound: the voice pipeline (wake word, VAD, transcription, TTS fallback) and the memory stack (embeddings when Ollama is present) stay on the machine; conversational turns run on a configured hosted ladder (Gemini 3.5 → Agnes), and the model key never leaves the machine except to that provider. Security is a first-class, visible system — tier policies (READ / WRITE / DESTRUCTIVE), a pre-execution auditor, and a hash-chained audit trail are surfaced in the UI, not hidden behind it.
 
 ## Operating Context
 

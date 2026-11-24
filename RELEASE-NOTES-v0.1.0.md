@@ -22,7 +22,7 @@ Seven desktop tools — open app, open file, move cursor, click, scroll, type, p
 - A real tool loop: the model receives schemas, JARVIS executes the call, feeds the result back, and answers from the result rather than from training data.
 - Persistent memory with semantic recall, plus explicit user preferences.
 - Durable background work: queued tasks, cron schedules, watched folders, and decomposed multi-step plans. Background work is read-only.
-- Model routing between local Ollama and an optional Gemini → Lite → Agnes cloud ladder, with slash-command preference (`/flash`, `/lite`, `/agnes`, `/auto`).
+- A hosted model ladder routes every turn (Gemini 3.5 Flash → Gemini 3.5 Lite → Agnes), with slash-command preference (`/3.5`, `/lite`, `/agnes`, `/auto`); Ollama, when installed, is an optional local engine for embeddings and the vision probe.
 
 ### Interface
 - A single-file browser orb UI with transcript, composer, settings drawer, trace panel, and audio queue.
@@ -48,7 +48,7 @@ CI is not configured yet; these are local verification results on `master` at th
 
 ## Requirements
 
-Windows 11 · Python 3.12+ · .NET SDK for the WebView2 shell · Ollama with a local model such as `qwen3:1.7b`. Cloud keys, hosted TTS, and connected Google/Notion accounts are optional.
+Windows 11 · Python 3.12+ · .NET SDK for the WebView2 shell · a hosted model key (`GEMINI_API_KEY` or `AGNES_API_KEY`). Ollama (local embeddings and the vision probe), hosted TTS, and connected Google/Notion accounts are optional.
 
 ## Getting started
 

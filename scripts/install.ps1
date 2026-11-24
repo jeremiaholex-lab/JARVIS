@@ -14,25 +14,23 @@ function Write-JarvisEnv {
         [Parameter(Mandatory = $true)][hashtable]$Values
     )
 
-    # Merge over an existing .env: skipped prompts (blank values) preserve
-    # what the file already holds, and only supplied values overwrite.
-    $existing = @{}
-    if (Test-Path -LiteralPath $Path) {
-        foreach ($line in (Get-Content -LiteralPath $Path)) {
-            if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
-                $existing[$Matches[1]] = $line
-            }
-        }
-    }
+    # Merge over an existing .env: lines the file already has (comments,
+    # blank lines, keys not prompted for) stay verbatim; a supplied value
+    # replaces that key's line, and new keys are appended at the end.
+    $lines = if (Test-Path -LiteralPath $Path) { @(Get-Content -LiteralPath $Path) } else { @() }
     foreach ($key in $Values.Keys) {
         $value = [string]$Values[$key]
-        if (-not [string]::IsNullOrWhiteSpace($value)) {
-            $existing[$key] = '{0}={1}' -f $key, $value
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        $assignment = '{0}={1}' -f $key, $value
+        $replaced = $false
+        foreach ($i in 0..($lines.Count - 1)) {
+            $m = [regex]::Match([string]$lines[$i], '^([A-Za-z_][A-Za-z0-9_]*)=')
+            if ($m.Success -and $m.Groups[1].Value -eq $key) {
+                $lines[$i] = $assignment
+                $replaced = $true
+            }
         }
-    }
-
-    $lines = foreach ($key in $existing.Keys | Sort-Object) {
-        $existing[$key]
+        if (-not $replaced) { $lines += $assignment }
     }
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
     try {

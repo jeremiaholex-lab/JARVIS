@@ -717,7 +717,17 @@
       $("conn").textContent = "RECONNECTING";
       $("connLed").className = "led";
       $("sysNote").textContent = "Backend link offline — retrying…";
-      setTimeout(connect, reconnectMs);
+      // The task token is minted per server process, so a restarted backend
+      // rejects this page's token no matter how often it retries. Reload to
+      // pick up a fresh one, but only once the backend is answering again.
+      setTimeout(async () => {
+        try {
+          const fresh = (await (await fetch("/", { cache: "no-store" })).text())
+            .match(/__JARVIS_TASK_TOKEN="([^"]+)"/);
+          if (window.__JARVIS_TASK_TOKEN && fresh && fresh[1] !== window.__JARVIS_TASK_TOKEN) { location.reload(); return; }
+        } catch (e) {}
+        connect();
+      }, reconnectMs);
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data !== "string") { const u = new Uint8Array(ev.data); ttsBytes += u.length; ttsChunks.push(u); return; }
